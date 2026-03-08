@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ClipboardPaste, Download, Loader, CheckCircle, AlertCircle,
-  X, Zap, Settings, ChevronDown, Trash2
+  X, Zap, Settings, ChevronDown, Trash2, RefreshCw
 } from 'lucide-react'
 
 interface VideoInfo {
@@ -234,6 +234,63 @@ export default function GrabberApp() {
     }
   }
 
+  const handleQuickGrab = async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (!text?.trim()) return
+      const clipUrl = text.trim()
+      setUrl(clipUrl)
+      setLoading(true)
+      setError('')
+      setVideoInfo(null)
+      autoTriggered.current = false
+
+      const res = await fetch(`/api/info?url=${encodeURIComponent(clipUrl)}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch')
+
+      setVideoInfo(data)
+      setSelectedFormat('bv*+ba/b')
+
+      if (settings.autoBest) {
+        autoTriggered.current = true
+        // Need to pass info directly since state hasn't updated yet
+        const startRes = await fetch('/api/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: clipUrl, formatId: 'bv*+ba/b', title: data.title, thumbnail: data.thumbnail }),
+        })
+        const dlData = await startRes.json()
+        if (!startRes.ok) throw new Error(dlData.error)
+
+        const job: DownloadJob = {
+          id: dlData.id, title: data.title, thumbnail: data.thumbnail,
+          status: 'downloading', percent: 0, speed: '', eta: '', totalSize: '',
+          url: clipUrl, formatLabel: 'Best Quality',
+        }
+        setDownloads(prev => [job, ...prev])
+
+        const evtSource = new EventSource(`/api/progress/${dlData.id}`)
+        evtSource.onmessage = (event) => {
+          const msg = JSON.parse(event.data)
+          setDownloads(prev => prev.map(d => {
+            if (d.id !== dlData.id) return d
+            if (msg.type === 'progress') return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
+            if (msg.type === 'done') { triggerFileDownload(dlData.id, msg.fileName); return { ...d, status: 'done', percent: 100, fileName: msg.fileName } }
+            if (msg.type === 'error') return { ...d, status: 'error', error: msg.message }
+            return d
+          }))
+          if (msg.type === 'done' || msg.type === 'error') evtSource.close()
+        }
+        evtSource.onerror = () => evtSource.close()
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to grab video')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const removeDownload = (id: string) => {
     setDownloads(prev => prev.filter(d => d.id !== id))
   }
@@ -315,14 +372,24 @@ export default function GrabberApp() {
               <ClipboardPaste size={18} />
             </button>
           </div>
-          <button
-            onClick={() => fetchInfo(url)}
-            disabled={!url.trim() || loading}
-            className="w-full py-3 bg-sky-500 hover:bg-sky-600 disabled:bg-[#262626] disabled:text-neutral-600 rounded-xl text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
-          >
-            {loading ? <Loader size={16} className="animate-spin" /> : <Download size={16} />}
-            {loading ? 'Fetching...' : 'Fetch Video'}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => fetchInfo(url)}
+              disabled={!url.trim() || loading}
+              className="flex-1 py-3 bg-sky-500 hover:bg-sky-600 disabled:bg-[#262626] disabled:text-neutral-600 rounded-xl text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
+            >
+              {loading ? <Loader size={16} className="animate-spin" /> : <Download size={16} />}
+              {loading ? 'Fetching...' : 'Fetch Video'}
+            </button>
+            <button
+              onClick={handleQuickGrab}
+              disabled={loading}
+              className="px-4 py-3 bg-[#1a1a1a] border border-[#262626] hover:bg-sky-500 hover:border-sky-500 hover:text-white disabled:opacity-40 rounded-xl text-neutral-400 transition-colors"
+              title="Paste & auto-download"
+            >
+              <RefreshCw size={18} />
+            </button>
+          </div>
         </div>
 
         {/* Error */}
