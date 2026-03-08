@@ -243,7 +243,7 @@ export default function GrabberApp() {
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-3 border-b border-[#1a1a1a]">
         <div className="flex items-center gap-2">
-          <Download size={20} className="text-amber-500" />
+          <Download size={20} className="text-sky-500" />
           <h1 className="text-base font-semibold">Grabber</h1>
         </div>
         <button
@@ -269,14 +269,14 @@ export default function GrabberApp() {
                 onChange={(e) => setSettings(s => ({ ...s, autoDetect: e.target.checked }))}
                 className="sr-only peer"
               />
-              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-amber-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-sky-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
           <div className="flex items-center justify-between">
             <div>
               <div className="flex items-center gap-1.5">
-                <Zap size={14} className="text-amber-500" />
+                <Zap size={14} className="text-sky-500" />
                 <p className="text-sm text-white">Auto best quality</p>
               </div>
               <p className="text-[11px] text-neutral-500">Instantly downloads best quality when URL is detected</p>
@@ -288,7 +288,7 @@ export default function GrabberApp() {
                 onChange={(e) => setSettings(s => ({ ...s, autoBest: e.target.checked }))}
                 className="sr-only peer"
               />
-              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-amber-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-sky-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
         </div>
@@ -305,11 +305,11 @@ export default function GrabberApp() {
               onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && fetchInfo(url)}
               placeholder="Paste video URL..."
-              className="flex-1 bg-[#1a1a1a] border border-[#262626] rounded-xl px-4 py-3 text-sm text-white placeholder-neutral-600 outline-none focus:border-amber-500 transition-colors"
+              className="flex-1 bg-[#1a1a1a] border border-[#262626] rounded-xl px-4 py-3 text-sm text-white placeholder-neutral-600 outline-none focus:border-sky-500 transition-colors"
             />
             <button
               onClick={handlePaste}
-              className="px-4 py-3 bg-[#1a1a1a] border border-[#262626] rounded-xl text-neutral-400 hover:text-amber-500 hover:border-amber-500/50 transition-colors"
+              className="px-4 py-3 bg-[#1a1a1a] border border-[#262626] rounded-xl text-neutral-400 hover:text-sky-500 hover:border-sky-500/50 transition-colors"
               title="Paste from clipboard"
             >
               <ClipboardPaste size={18} />
@@ -318,7 +318,7 @@ export default function GrabberApp() {
           <button
             onClick={() => fetchInfo(url)}
             disabled={!url.trim() || loading}
-            className="w-full py-3 bg-amber-500 hover:bg-amber-600 disabled:bg-[#262626] disabled:text-neutral-600 rounded-xl text-sm font-medium text-black transition-colors flex items-center justify-center gap-2"
+            className="w-full py-3 bg-sky-500 hover:bg-sky-600 disabled:bg-[#262626] disabled:text-neutral-600 rounded-xl text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
           >
             {loading ? <Loader size={16} className="animate-spin" /> : <Download size={16} />}
             {loading ? 'Fetching...' : 'Fetch Video'}
@@ -364,7 +364,7 @@ export default function GrabberApp() {
                         onClick={() => setSelectedFormat(f.formatId)}
                         className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                           selectedFormat === f.formatId
-                            ? 'bg-amber-500 text-black'
+                            ? 'bg-sky-500 text-white'
                             : 'bg-[#262626] text-neutral-300 hover:bg-[#333]'
                         }`}
                       >
@@ -377,7 +377,7 @@ export default function GrabberApp() {
                       const fmt = videoInfo.formats.find(f => f.formatId === selectedFormat)
                       handleDownload(selectedFormat, fmt?.label || 'Best Quality')
                     }}
-                    className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 rounded-xl text-sm font-medium text-black transition-colors flex items-center justify-center gap-2"
+                    className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 rounded-xl text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
                   >
                     <Download size={16} />
                     Download
@@ -416,7 +416,7 @@ export default function GrabberApp() {
                       <p className="text-xs text-white truncate">{dl.title}</p>
                       <div className="flex items-center gap-1 flex-shrink-0">
                         {dl.status === 'downloading' && (
-                          <Loader size={12} className="animate-spin text-amber-500" />
+                          <Loader size={12} className="animate-spin text-sky-500" />
                         )}
                         {dl.status === 'done' && (
                           <CheckCircle size={12} className="text-green-500" />
@@ -441,7 +441,7 @@ export default function GrabberApp() {
                       <>
                         <div className="mt-1.5 w-full bg-[#262626] rounded-full h-1">
                           <div
-                            className="bg-amber-500 h-1 rounded-full transition-all duration-300"
+                            className="bg-sky-500 h-1 rounded-full transition-all duration-300"
                             style={{ width: `${dl.percent}%` }}
                           />
                         </div>
@@ -458,7 +458,7 @@ export default function GrabberApp() {
                       <div className="mt-1.5">
                         <button
                           onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
-                          className="text-[10px] text-amber-500 hover:text-amber-400 font-medium transition-colors"
+                          className="text-[10px] text-sky-500 hover:text-sky-400 font-medium transition-colors"
                         >
                           Download again
                         </button>
@@ -482,7 +482,7 @@ export default function GrabberApp() {
             <p className="text-sm">Paste a video URL to get started</p>
             <p className="text-xs mt-1">Works with YouTube, TikTok, Instagram, and 1800+ sites</p>
             {settings.autoDetect && (
-              <p className="text-xs mt-3 text-amber-500/60">
+              <p className="text-xs mt-3 text-sky-500/60">
                 Clipboard auto-detection is on
               </p>
             )}
