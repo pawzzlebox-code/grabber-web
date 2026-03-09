@@ -1,10 +1,12 @@
 FROM node:20-bookworm-slim AS base
 
-# Install yt-dlp and ffmpeg
+# Install yt-dlp, ffmpeg, and deno (JS runtime for yt-dlp)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip ffmpeg ca-certificates && \
+    apt-get install -y --no-install-recommends python3 python3-pip ffmpeg ca-certificates curl unzip && \
     pip3 install --break-system-packages yt-dlp && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    curl -fsSL https://deno.land/install.sh | sh && \
+    mv /root/.deno/bin/deno /usr/local/bin/deno && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /root/.deno
 
 # Install dependencies
 FROM base AS deps

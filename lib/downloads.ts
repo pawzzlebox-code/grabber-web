@@ -33,6 +33,24 @@ export interface DownloadJob {
 const downloads = new Map<string, DownloadJob>()
 const TEMP_DIR = path.join(os.tmpdir(), 'grabber-downloads')
 
+// Cookie browser setting (persisted in env or set via API)
+let cookieBrowser: string = process.env.COOKIE_BROWSER || ''
+
+export function setCookieBrowser(browser: string) { cookieBrowser = browser }
+export function getCookieBrowser(): string { return cookieBrowser }
+
+function cookieArgs(): string[] {
+  if (cookieBrowser && cookieBrowser !== 'none') {
+    return ['--cookies-from-browser', cookieBrowser]
+  }
+  // Check if a cookies.txt file exists
+  const cookieFile = path.join(TEMP_DIR, 'cookies.txt')
+  if (fs.existsSync(cookieFile)) {
+    return ['--cookies', cookieFile]
+  }
+  return []
+}
+
 // Ensure temp dir exists
 if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true })
@@ -72,6 +90,7 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
       '--no-playlist',
       '--dump-json',
       '--encoding', 'utf-8',
+      ...cookieArgs(),
       url
     ], {
       env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
@@ -151,6 +170,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     '--newline',
     '--encoding', 'utf-8',
     '--no-mtime',
+    ...cookieArgs(),
     '-o', path.join(TEMP_DIR, `${id}_%(title).80B.%(ext)s`),
     '--print', 'after_move:filepath',
   ]
