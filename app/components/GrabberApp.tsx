@@ -236,61 +236,30 @@ export default function GrabberApp() {
     }
   }
 
-  const handleQuickGrab = async () => {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const handleReload = async () => {
+    // Clear everything first
+    setUrl('')
+    setVideoInfo(null)
+    setError('')
+    autoTriggered.current = false
+
+    // Try to read clipboard and auto-paste
     try {
       const text = await navigator.clipboard.readText()
-      if (!text?.trim()) return
-      const clipUrl = text.trim()
-      setUrl(clipUrl)
-      setLoading(true)
-      setError('')
-      setVideoInfo(null)
-      autoTriggered.current = false
-
-      const res = await fetch(`/api/info?url=${encodeURIComponent(clipUrl)}`)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch')
-
-      setVideoInfo(data)
-      setSelectedFormat('bv*+ba/b')
-
-      if (settings.autoBest) {
-        autoTriggered.current = true
-        // Need to pass info directly since state hasn't updated yet
-        const startRes = await fetch('/api/download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: clipUrl, formatId: 'bv*+ba/b', title: data.title, thumbnail: data.thumbnail }),
-        })
-        const dlData = await startRes.json()
-        if (!startRes.ok) throw new Error(dlData.error)
-
-        const job: DownloadJob = {
-          id: dlData.id, title: data.title, thumbnail: data.thumbnail,
-          status: 'downloading', percent: 0, speed: '', eta: '', totalSize: '',
-          url: clipUrl, formatLabel: 'Best Quality',
-        }
-        setDownloads(prev => [job, ...prev])
-
-        const evtSource = new EventSource(`/api/progress/${dlData.id}`)
-        evtSource.onmessage = (event) => {
-          const msg = JSON.parse(event.data)
-          setDownloads(prev => prev.map(d => {
-            if (d.id !== dlData.id) return d
-            if (msg.type === 'progress') return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
-            if (msg.type === 'done') { triggerFileDownload(dlData.id, msg.fileName); return { ...d, status: 'done', percent: 100, fileName: msg.fileName } }
-            if (msg.type === 'error') return { ...d, status: 'error', error: msg.message }
-            return d
-          }))
-          if (msg.type === 'done' || msg.type === 'error') evtSource.close()
-        }
-        evtSource.onerror = () => evtSource.close()
+      if (text?.trim()) {
+        const clipUrl = text.trim()
+        setUrl(clipUrl)
+        fetchInfo(clipUrl)
+        return
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to grab video')
-    } finally {
-      setLoading(false)
+    } catch {
+      // Clipboard API not available (iOS Safari, permission denied, etc.)
     }
+
+    // Fallback: focus input so user can paste manually
+    inputRef.current?.focus()
   }
 
   const removeDownload = (id: string) => {
@@ -365,6 +334,7 @@ export default function GrabberApp() {
         <div className="space-y-2">
           <div className="flex gap-2">
             <input
+              ref={inputRef}
               type="url"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
@@ -390,10 +360,10 @@ export default function GrabberApp() {
               {loading ? 'Fetching...' : 'Fetch Video'}
             </button>
             <button
-              onClick={handleQuickGrab}
+              onClick={handleReload}
               disabled={loading}
               className="px-4 py-3 bg-[#1a1a1a] border border-[#262626] hover:bg-sky-500 hover:border-sky-500 hover:text-white disabled:opacity-40 rounded-xl text-neutral-400 transition-colors"
-              title="Paste & auto-download"
+              title="Clear & paste new link"
             >
               <RefreshCw size={18} />
             </button>
