@@ -31,7 +31,7 @@ interface DownloadJob {
 }
 
 // Persist settings in localStorage
-const defaultSettings = { autoDetect: true, autoBest: false, cookieBrowser: 'none' }
+const defaultSettings = { autoDetect: true, autoBest: false }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -87,14 +87,9 @@ export default function GrabberApp() {
     setSettings(loadSettings())
   }, [])
 
-  // Save settings on change + sync cookie browser to server
+  // Save settings on change
   useEffect(() => {
     saveSettings(settings)
-    fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cookieBrowser: settings.cookieBrowser }),
-    }).catch(() => {})
   }, [settings])
 
   // Clipboard auto-detection
@@ -356,24 +351,10 @@ export default function GrabberApp() {
             </label>
           </div>
 
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-white">Browser cookies</p>
-              <p className="text-[11px] text-neutral-500">Required for YouTube — uses cookies from your browser</p>
-            </div>
-            <select
-              value={settings.cookieBrowser}
-              onChange={(e) => setSettings(s => ({ ...s, cookieBrowser: e.target.value }))}
-              className="bg-[#262626] border border-[#333] rounded-lg px-2 py-1 text-xs text-white outline-none focus:border-sky-500"
-            >
-              <option value="none">None</option>
-              <option value="chrome">Chrome</option>
-              <option value="firefox">Firefox</option>
-              <option value="edge">Edge</option>
-              <option value="brave">Brave</option>
-              <option value="opera">Opera</option>
-              <option value="safari">Safari</option>
-            </select>
+          <div className="pt-1">
+            <p className="text-[10px] text-neutral-600">
+              Install the Grabber Helper Chrome extension for YouTube support
+            </p>
           </div>
         </div>
       )}

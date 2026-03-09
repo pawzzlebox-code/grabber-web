@@ -33,22 +33,21 @@ export interface DownloadJob {
 const downloads = new Map<string, DownloadJob>()
 const TEMP_DIR = path.join(os.tmpdir(), 'grabber-downloads')
 
-// Cookie browser setting (persisted in env or set via API)
-let cookieBrowser: string = process.env.COOKIE_BROWSER || ''
-
-export function setCookieBrowser(browser: string) { cookieBrowser = browser }
-export function getCookieBrowser(): string { return cookieBrowser }
+// Cookie file path — written by extension or upload
+const COOKIE_FILE = path.join(TEMP_DIR, 'cookies.txt')
 
 function cookieArgs(): string[] {
-  if (cookieBrowser && cookieBrowser !== 'none') {
-    return ['--cookies-from-browser', cookieBrowser]
-  }
-  // Check if a cookies.txt file exists
-  const cookieFile = path.join(TEMP_DIR, 'cookies.txt')
-  if (fs.existsSync(cookieFile)) {
-    return ['--cookies', cookieFile]
+  if (fs.existsSync(COOKIE_FILE)) {
+    return ['--cookies', COOKIE_FILE]
   }
   return []
+}
+
+function saveCookies(cookiesTxt: string) {
+  if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true })
+  }
+  fs.writeFileSync(COOKIE_FILE, cookiesTxt, 'utf-8')
 }
 
 // Ensure temp dir exists
@@ -229,6 +228,14 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   })
 
   return job
+}
+
+export function startDownloadWithCookies(id: string, url: string, cookiesTxt?: string): DownloadJob {
+  // Save fresh cookies from extension
+  if (cookiesTxt) {
+    saveCookies(cookiesTxt)
+  }
+  return startDownload(id, url, 'bv*+ba/b')
 }
 
 export function cancelDownload(id: string) {
