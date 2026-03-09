@@ -146,16 +146,18 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
 
     proc.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error(stderr || `yt-dlp exited with code ${code}`))
+        console.error('[info] yt-dlp failed:', stderr.slice(0, 500))
+        reject(new Error(stderr.split('\n').pop()?.trim() || `yt-dlp exited with code ${code}`))
         return
       }
       try {
         // yt-dlp outputs one JSON object per line for multi-video
-        const lines = stdout.trim().split('\n').filter(l => l.trim())
+        // Filter to only JSON lines (skip progress/warning lines)
+        const jsonLines = stdout.trim().split('\n').filter(l => l.trim().startsWith('{'))
         const videos: VideoInfo[] = []
 
-        for (let i = 0; i < lines.length; i++) {
-          const json = JSON.parse(lines[i])
+        for (let i = 0; i < jsonLines.length; i++) {
+          const json = JSON.parse(jsonLines[i])
           videos.push({
             id: json.id,
             title: json.title || `Video ${i + 1}`,
@@ -163,7 +165,7 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
             duration: json.duration || 0,
             formats: buildFormats(json, twitter),
             url: json.webpage_url || json.url || url,
-            playlistIndex: lines.length > 1 ? i + 1 : undefined,
+            playlistIndex: jsonLines.length > 1 ? i + 1 : undefined,
           })
         }
 
@@ -173,7 +175,8 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
         }
 
         resolve(videos)
-      } catch (e) {
+      } catch (e: any) {
+        console.error('[info] parse error:', e?.message, 'stdout:', stdout.slice(0, 500))
         reject(new Error('Failed to parse video info'))
       }
     })
