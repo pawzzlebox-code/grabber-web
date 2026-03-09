@@ -13,6 +13,7 @@ interface VideoInfo {
   duration: number
   formats: { formatId: string; label: string; ext: string }[]
   url: string
+  playlistIndex?: number
 }
 
 interface DownloadJob {
@@ -72,13 +73,13 @@ function formatDuration(s: number): string {
 
 export default function GrabberApp() {
   const [url, setUrl] = useState('')
-  const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null)
+  const [videos, setVideos] = useState<VideoInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [downloads, setDownloads] = useState<DownloadJob[]>([])
   const [settings, setSettings] = useState(defaultSettings)
   const [showSettings, setShowSettings] = useState(false)
-  const [selectedFormat, setSelectedFormat] = useState('bv*+ba/b')
+  const [selectedFormats, setSelectedFormats] = useState<Record<string, string>>({})
   const lastClipboard = useRef('')
   const autoTriggered = useRef(false)
 
@@ -129,25 +130,35 @@ export default function GrabberApp() {
 
   // Auto-download best quality when info is fetched and autoBest is on
   useEffect(() => {
-    if (settings.autoBest && videoInfo && !autoTriggered.current) {
+    if (settings.autoBest && videos.length > 0 && !autoTriggered.current) {
       autoTriggered.current = true
-      handleDownload('bv*+ba/b', 'Best Quality')
+      for (const v of videos) {
+        const bestFmt = v.formats[0]
+        if (bestFmt) handleDownload(v, bestFmt.formatId, bestFmt.label)
+      }
     }
-  }, [videoInfo, settings.autoBest])
+  }, [videos, settings.autoBest])
 
   const fetchInfo = useCallback(async (videoUrl: string) => {
     if (!videoUrl.trim()) return
     setLoading(true)
     setError('')
-    setVideoInfo(null)
+    setVideos([])
+    setSelectedFormats({})
     autoTriggered.current = false
 
     try {
       const res = await fetch(`/api/info?url=${encodeURIComponent(videoUrl.trim())}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to fetch')
-      setVideoInfo(data)
-      setSelectedFormat('bv*+ba/b')
+      const vids: VideoInfo[] = data.videos || (data.id ? [data] : [])
+      setVideos(vids)
+      // Set default format for each video
+      const defaults: Record<string, string> = {}
+      for (const v of vids) {
+        defaults[v.id] = v.formats[0]?.formatId || 'b'
+      }
+      setSelectedFormats(defaults)
     } catch (err: any) {
       setError(err.message || 'Failed to fetch video info')
     } finally {
@@ -155,18 +166,17 @@ export default function GrabberApp() {
     }
   }, [])
 
-  const handleDownload = async (formatId: string, formatLabel: string) => {
-    if (!videoInfo) return
-
+  const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string) => {
     try {
       const res = await fetch('/api/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          url: videoInfo.url,
+          url: video.url,
           formatId,
-          title: videoInfo.title,
-          thumbnail: videoInfo.thumbnail,
+          title: video.title,
+          thumbnail: video.thumbnail,
+          playlistIndex: video.playlistIndex,
         }),
       })
       const data = await res.json()
@@ -174,11 +184,11 @@ export default function GrabberApp() {
 
       const job: DownloadJob = {
         id: data.id,
-        title: videoInfo.title,
-        thumbnail: videoInfo.thumbnail,
+        title: video.title,
+        thumbnail: video.thumbnail,
         status: 'downloading',
         percent: 0, speed: '', eta: '', totalSize: '',
-        url: videoInfo.url,
+        url: video.url,
         formatLabel,
       }
 
@@ -241,7 +251,7 @@ export default function GrabberApp() {
   const handleReload = async () => {
     // Clear everything first
     setUrl('')
-    setVideoInfo(null)
+    setVideos([])
     setError('')
     autoTriggered.current = false
 
@@ -381,55 +391,83 @@ export default function GrabberApp() {
           </div>
         )}
 
-        {/* Video Info Card */}
-        {videoInfo && (
-          <div className="bg-[#1a1a1a] border border-[#262626] rounded-xl overflow-hidden animate-fade-in">
-            {videoInfo.thumbnail && (
-              <img
-                src={videoInfo.thumbnail}
-                alt=""
-                className="w-full h-44 object-cover"
-              />
+        {/* Video Info Cards — stacked for multi-video */}
+        {videos.length > 0 && (
+          <div className="space-y-3">
+            {videos.length > 1 && (
+              <p className="text-xs text-neutral-400">{videos.length} videos found</p>
             )}
-            <div className="p-4 space-y-3">
-              <div>
-                <h3 className="text-sm font-medium text-white line-clamp-2">{videoInfo.title}</h3>
-                {videoInfo.duration > 0 && (
-                  <p className="text-xs text-neutral-500 mt-1">{formatDuration(videoInfo.duration)}</p>
+            {videos.map((video, idx) => (
+              <div key={video.id} className="bg-[#1a1a1a] border border-[#262626] rounded-xl overflow-hidden animate-fade-in">
+                {video.thumbnail && (
+                  <img
+                    src={video.thumbnail}
+                    alt=""
+                    className="w-full h-44 object-cover"
+                  />
                 )}
-              </div>
-
-              {/* Format selector */}
-              {!settings.autoBest && (
-                <>
-                  <div className="flex flex-wrap gap-1.5">
-                    {videoInfo.formats.map((f) => (
-                      <button
-                        key={f.formatId}
-                        onClick={() => setSelectedFormat(f.formatId)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                          selectedFormat === f.formatId
-                            ? 'bg-sky-500 text-white'
-                            : 'bg-[#262626] text-neutral-300 hover:bg-[#333]'
-                        }`}
-                      >
-                        {f.label}
-                      </button>
-                    ))}
+                <div className="p-4 space-y-3">
+                  <div>
+                    <h3 className="text-sm font-medium text-white line-clamp-2">
+                      {videos.length > 1 && <span className="text-sky-500 mr-1.5">#{idx + 1}</span>}
+                      {video.title}
+                    </h3>
+                    {video.duration > 0 && (
+                      <p className="text-xs text-neutral-500 mt-1">{formatDuration(video.duration)}</p>
+                    )}
                   </div>
-                  <button
-                    onClick={() => {
-                      const fmt = videoInfo.formats.find(f => f.formatId === selectedFormat)
-                      handleDownload(selectedFormat, fmt?.label || 'Best Quality')
-                    }}
-                    className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 rounded-xl text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
-                  >
-                    <Download size={16} />
-                    Download
-                  </button>
-                </>
-              )}
-            </div>
+
+                  {/* Format selector */}
+                  {!settings.autoBest && (
+                    <>
+                      <div className="flex flex-wrap gap-1.5">
+                        {video.formats.map((f) => (
+                          <button
+                            key={f.formatId}
+                            onClick={() => setSelectedFormats(prev => ({ ...prev, [video.id]: f.formatId }))}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                              (selectedFormats[video.id] || video.formats[0]?.formatId) === f.formatId
+                                ? 'bg-sky-500 text-white'
+                                : 'bg-[#262626] text-neutral-300 hover:bg-[#333]'
+                            }`}
+                          >
+                            {f.label}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => {
+                          const fmtId = selectedFormats[video.id] || video.formats[0]?.formatId
+                          const fmt = video.formats.find(f => f.formatId === fmtId)
+                          handleDownload(video, fmtId, fmt?.label || 'Best Quality')
+                        }}
+                        className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 rounded-xl text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Download size={16} />
+                        Download{videos.length > 1 ? ` #${idx + 1}` : ''}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {/* Download All button for multi-video */}
+            {videos.length > 1 && !settings.autoBest && (
+              <button
+                onClick={() => {
+                  for (const v of videos) {
+                    const fmtId = selectedFormats[v.id] || v.formats[0]?.formatId
+                    const fmt = v.formats.find(f => f.formatId === fmtId)
+                    handleDownload(v, fmtId, fmt?.label || 'Best Quality')
+                  }
+                }}
+                className="w-full py-3 bg-sky-500 hover:bg-sky-600 rounded-xl text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
+              >
+                <Download size={16} />
+                Download All ({videos.length} videos)
+              </button>
+            )}
           </div>
         )}
 
@@ -521,7 +559,7 @@ export default function GrabberApp() {
         )}
 
         {/* Empty state */}
-        {!videoInfo && !loading && downloads.length === 0 && (
+        {videos.length === 0 && !loading && downloads.length === 0 && (
           <div className="text-center py-12 text-neutral-600">
             <Download size={40} strokeWidth={1} className="mx-auto mb-3" />
             <p className="text-sm">Paste a video URL to get started</p>

@@ -8,8 +8,9 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const info = await fetchVideoInfo(url)
-    return NextResponse.json(info)
+    const videos = await fetchVideoInfo(url)
+    // Return { videos: [...] } for multi-video support
+    return NextResponse.json({ videos })
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Failed to fetch info' }, { status: 500 })
   }

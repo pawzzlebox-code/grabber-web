@@ -10,6 +10,7 @@ export interface VideoInfo {
   duration: number
   formats: { formatId: string; label: string; ext: string; filesize?: number }[]
   url: string
+  playlistIndex?: number
 }
 
 export interface DownloadJob {
@@ -83,15 +84,57 @@ function notify(job: DownloadJob, data: any) {
   }
 }
 
-export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
+function isTwitterUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace('www.', '')
+    return host === 'twitter.com' || host === 'x.com' || host === 't.co'
+  } catch { return false }
+}
+
+function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
+  const seen = new Set<string>()
+  const formats: VideoInfo['formats'] = []
+
+  // Best quality — use 'b' for Twitter (pre-merged MP4s), 'bv*+ba/b' for others
+  const bestFormat = twitter ? 'b' : 'bv*+ba/b'
+  formats.push({ formatId: bestFormat, label: 'Best Quality', ext: 'mp4', filesize: undefined })
+
+  const videoFormats = (json.formats || [])
+    .filter((f: any) => f.vcodec !== 'none' && f.height)
+    .sort((a: any, b: any) => (b.height || 0) - (a.height || 0))
+
+  for (const f of videoFormats) {
+    const key = `${f.height}p`
+    if (!seen.has(key) && f.height >= 360) {
+      seen.add(key)
+      const fmtId = twitter
+        ? `b[height<=${f.height}]`
+        : `bv[height<=${f.height}]+ba/b[height<=${f.height}]`
+      formats.push({ formatId: fmtId, label: key, ext: f.ext || 'mp4', filesize: f.filesize || undefined })
+    }
+  }
+
+  if (!twitter) {
+    formats.push({ formatId: 'ba', label: 'Audio Only', ext: 'webm', filesize: undefined })
+  }
+
+  return formats
+}
+
+export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
+  const twitter = isTwitterUrl(url)
+
   return new Promise((resolve, reject) => {
-    const proc = spawn('yt-dlp', [
-      '--no-playlist',
+    const args = [
       '--dump-json',
       '--encoding', 'utf-8',
       ...cookieArgs(),
-      url
-    ], {
+    ]
+    // Only use --no-playlist for non-Twitter URLs
+    if (!twitter) args.unshift('--no-playlist')
+    args.push(url)
+
+    const proc = spawn('yt-dlp', args, {
       env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
     })
 
@@ -107,44 +150,29 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
         return
       }
       try {
-        const json = JSON.parse(stdout)
+        // yt-dlp outputs one JSON object per line for multi-video
+        const lines = stdout.trim().split('\n').filter(l => l.trim())
+        const videos: VideoInfo[] = []
 
-        // Build format list — deduplicate by height for video, keep audio
-        const seen = new Set<string>()
-        const formats: VideoInfo['formats'] = []
-
-        // Add best option
-        formats.push({ formatId: 'bv*+ba/b', label: 'Best Quality', ext: 'mp4', filesize: undefined })
-
-        // Video formats by resolution
-        const videoFormats = (json.formats || [])
-          .filter((f: any) => f.vcodec !== 'none' && f.height)
-          .sort((a: any, b: any) => (b.height || 0) - (a.height || 0))
-
-        for (const f of videoFormats) {
-          const key = `${f.height}p`
-          if (!seen.has(key) && f.height >= 360) {
-            seen.add(key)
-            formats.push({
-              formatId: `bv[height<=${f.height}]+ba/b[height<=${f.height}]`,
-              label: key,
-              ext: f.ext || 'mp4',
-              filesize: f.filesize || undefined,
-            })
-          }
+        for (let i = 0; i < lines.length; i++) {
+          const json = JSON.parse(lines[i])
+          videos.push({
+            id: json.id,
+            title: json.title || `Video ${i + 1}`,
+            thumbnail: json.thumbnail || '',
+            duration: json.duration || 0,
+            formats: buildFormats(json, twitter),
+            url: json.webpage_url || json.url || url,
+            playlistIndex: lines.length > 1 ? i + 1 : undefined,
+          })
         }
 
-        // Audio only
-        formats.push({ formatId: 'ba', label: 'Audio Only', ext: 'webm', filesize: undefined })
+        if (videos.length === 0) {
+          reject(new Error('No videos found'))
+          return
+        }
 
-        resolve({
-          id: json.id,
-          title: json.title || 'Unknown',
-          thumbnail: json.thumbnail || '',
-          duration: json.duration || 0,
-          formats,
-          url,
-        })
+        resolve(videos)
       } catch (e) {
         reject(new Error('Failed to parse video info'))
       }
@@ -152,7 +180,7 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo> {
   })
 }
 
-export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string): DownloadJob {
+export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number): DownloadJob {
   const job: DownloadJob = {
     id, url,
     title: title || 'Downloading...',
@@ -164,8 +192,8 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   }
   downloads.set(id, job)
 
+  const twitter = isTwitterUrl(url)
   const args = [
-    '--no-playlist',
     '--newline',
     '--encoding', 'utf-8',
     '--no-mtime',
@@ -174,10 +202,18 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     '--print', 'after_move:filepath',
   ]
 
-  if (formatId && formatId !== 'bv*+ba/b') {
+  if (!twitter) {
+    args.push('--no-playlist')
+  } else if (playlistIndex !== undefined) {
+    // Download specific video from multi-video tweet (1-indexed)
+    args.push('--playlist-items', String(playlistIndex))
+  }
+
+  const defaultFmt = twitter ? 'b' : 'bv*+ba/b'
+  if (formatId) {
     args.push('-f', formatId)
   } else {
-    args.push('-f', 'bv*+ba/b')
+    args.push('-f', defaultFmt)
   }
 
   args.push(url)
