@@ -227,26 +227,30 @@ export default function GrabberApp() {
 
   const triggerFileDownload = async (id: string, fileName: string) => {
     const fileUrl = `/api/file/${id}`
+    const name = fileName || 'video.mp4'
 
-    // Try Web Share API (iOS/Android) — lets user "Save Video" directly
-    if (navigator.share && navigator.canShare) {
+    // Try Web Share API (iOS Safari + Chrome) — opens share sheet for "Save Video"
+    if (navigator.share) {
       try {
         const res = await fetch(fileUrl)
         const blob = await res.blob()
-        const file = new File([blob], fileName || 'video.mp4', { type: blob.type })
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({ files: [file] })
-          return
-        }
-      } catch {
-        // User cancelled share or API failed — fall through to normal download
+        // Force video/mp4 MIME type — some browsers return wrong type from blob
+        const ext = name.split('.').pop()?.toLowerCase()
+        const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
+        const file = new File([blob], name, { type: mime })
+        await navigator.share({ files: [file] })
+        return
+      } catch (err: any) {
+        // AbortError = user cancelled share sheet — don't fall through
+        if (err?.name === 'AbortError') return
+        // Other errors — fall through to normal download
       }
     }
 
-    // Fallback: normal browser download
+    // Fallback: normal browser download (desktop)
     const a = document.createElement('a')
     a.href = fileUrl
-    a.download = fileName || 'download'
+    a.download = name
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
