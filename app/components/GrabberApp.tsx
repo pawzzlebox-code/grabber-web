@@ -225,9 +225,27 @@ export default function GrabberApp() {
     }
   }
 
-  const triggerFileDownload = (id: string, fileName: string) => {
+  const triggerFileDownload = async (id: string, fileName: string) => {
+    const fileUrl = `/api/file/${id}`
+
+    // Try Web Share API (iOS/Android) — lets user "Save Video" directly
+    if (navigator.share && navigator.canShare) {
+      try {
+        const res = await fetch(fileUrl)
+        const blob = await res.blob()
+        const file = new File([blob], fileName || 'video.mp4', { type: blob.type })
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file] })
+          return
+        }
+      } catch {
+        // User cancelled share or API failed — fall through to normal download
+      }
+    }
+
+    // Fallback: normal browser download
     const a = document.createElement('a')
-    a.href = `/api/file/${id}`
+    a.href = fileUrl
     a.download = fileName || 'download'
     document.body.appendChild(a)
     a.click()
