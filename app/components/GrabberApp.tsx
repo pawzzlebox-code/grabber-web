@@ -82,6 +82,11 @@ export default function GrabberApp() {
   const [selectedFormats, setSelectedFormats] = useState<Record<string, string>>({})
   const lastClipboard = useRef('')
   const autoTriggered = useRef(false)
+  const [canShare, setCanShare] = useState(false)
+
+  useEffect(() => {
+    setCanShare(typeof navigator !== 'undefined' && !!navigator.share)
+  }, [])
 
   // Load settings on mount
   useEffect(() => {
@@ -204,7 +209,11 @@ export default function GrabberApp() {
             return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
           }
           if (msg.type === 'done') {
-            triggerFileDownload(data.id, msg.fileName)
+            // On mobile (share API available), don't auto-trigger — user needs to tap for share sheet
+            // On desktop, auto-download via <a> tag
+            if (typeof navigator === 'undefined' || !navigator.share) {
+              triggerFileDownload(data.id, msg.fileName)
+            }
             return { ...d, status: 'done', percent: 100, fileName: msg.fileName }
           }
           if (msg.type === 'error') {
@@ -562,9 +571,9 @@ export default function GrabberApp() {
                       <div className="mt-1.5">
                         <button
                           onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
-                          className="text-[10px] text-sky-500 hover:text-sky-400 font-medium transition-colors"
+                          className="w-full py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
                         >
-                          Download again
+                          {canShare ? 'Save to Photos' : 'Download Again'}
                         </button>
                       </div>
                     )}
@@ -596,7 +605,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 10
+        Build 11
       </footer>
     </div>
   )
