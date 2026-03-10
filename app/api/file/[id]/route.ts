@@ -1,6 +1,21 @@
 import { NextRequest } from 'next/server'
 import { getDownload } from '@/lib/downloads'
 import fs from 'fs'
+import path from 'path'
+
+function getMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase()
+  const mimes: Record<string, string> = {
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mkv': 'video/x-matroska',
+    '.mov': 'video/quicktime',
+    '.m4a': 'audio/mp4',
+    '.mp3': 'audio/mpeg',
+    '.webm': 'video/webm',
+  }
+  return mimes[ext] || 'application/octet-stream'
+}
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   const job = getDownload(params.id)
@@ -14,6 +29,11 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   }
 
   const stat = fs.statSync(job.filePath)
+  const fileName = job.fileName || 'download'
+  const inline = req.nextUrl.searchParams.get('inline') === '1'
+  const mime = inline ? getMimeType(job.filePath) : 'application/octet-stream'
+  const disposition = inline ? 'inline' : `attachment; filename="${encodeURIComponent(fileName)}"`
+
   const stream = fs.createReadStream(job.filePath)
   const webStream = new ReadableStream({
     start(controller) {
@@ -26,12 +46,10 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     }
   })
 
-  const fileName = job.fileName || 'download'
-
   return new Response(webStream, {
     headers: {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${encodeURIComponent(fileName)}"`,
+      'Content-Type': mime,
+      'Content-Disposition': disposition,
       'Content-Length': String(stat.size),
     },
   })
