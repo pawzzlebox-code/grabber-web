@@ -71,8 +71,6 @@ function formatDuration(s: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`
 }
 
-const isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent)
-
 export default function GrabberApp() {
   const [url, setUrl] = useState('')
   const [videos, setVideos] = useState<VideoInfo[]>([])
@@ -206,8 +204,7 @@ export default function GrabberApp() {
             return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
           }
           if (msg.type === 'done') {
-            // On iOS: don't auto-download, show inline video instead
-            if (!isIOS) triggerFileDownload(data.id, msg.fileName)
+            triggerFileDownload(data.id, msg.fileName)
             return { ...d, status: 'done', percent: 100, fileName: msg.fileName }
           }
           if (msg.type === 'error') {
@@ -561,21 +558,7 @@ export default function GrabberApp() {
                       </>
                     )}
 
-                    {dl.status === 'done' && isIOS && (
-                      <div className="mt-2 space-y-1.5">
-                        <video
-                          src={`/api/file/${dl.id}?inline=1`}
-                          controls
-                          playsInline
-                          className="w-full rounded-lg"
-                        />
-                        <p className="text-[10px] text-neutral-500 text-center">
-                          Long-press video → Save Video
-                        </p>
-                      </div>
-                    )}
-
-                    {dl.status === 'done' && !isIOS && (
+                    {dl.status === 'done' && (
                       <div className="mt-1.5">
                         <button
                           onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
@@ -613,7 +596,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 9
+        Build 10
       </footer>
     </div>
   )
