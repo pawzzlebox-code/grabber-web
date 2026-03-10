@@ -12,7 +12,6 @@ function getMimeType(filePath: string): string {
     '.mov': 'video/quicktime',
     '.m4a': 'audio/mp4',
     '.mp3': 'audio/mpeg',
-    '.webm': 'video/webm',
   }
   return mimes[ext] || 'application/octet-stream'
 }
