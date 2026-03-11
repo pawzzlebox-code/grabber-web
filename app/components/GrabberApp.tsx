@@ -84,6 +84,7 @@ export default function GrabberApp() {
   const autoTriggered = useRef(false)
   const [canShare, setCanShare] = useState(false)
   const [saveProgress, setSaveProgress] = useState<Record<string, number>>({})
+  const fileCache = useRef<Record<string, File>>({})
 
   useEffect(() => {
     setCanShare(typeof navigator !== 'undefined' && !!navigator.share)
@@ -211,9 +212,11 @@ export default function GrabberApp() {
             return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
           }
           if (msg.type === 'done') {
-            // On mobile (share API available), don't auto-trigger — user needs to tap for share sheet
-            // On desktop, auto-download via <a> tag
-            if (typeof navigator === 'undefined' || !navigator.share) {
+            if (typeof navigator !== 'undefined' && navigator.share) {
+              // Mobile: pre-fetch file into cache so "Save to Photos" tap is instant
+              prefetchFile(data.id, msg.fileName)
+            } else {
+              // Desktop: auto-download via <a> tag
               triggerFileDownload(data.id, msg.fileName)
             }
             return { ...d, status: 'done', percent: 100, fileName: msg.fileName }
@@ -236,60 +239,65 @@ export default function GrabberApp() {
     }
   }
 
-  const triggerFileDownload = async (id: string, fileName: string) => {
+  // Pre-fetch file from server into cache (with progress), called automatically when download completes on mobile
+  const prefetchFile = async (id: string, fileName: string) => {
     const fileUrl = `/api/file/${id}`
     const name = fileName || 'video.mp4'
+    try {
+      setSaveProgress(prev => ({ ...prev, [id]: 0 }))
+      const res = await fetch(fileUrl)
+      const contentLength = res.headers.get('content-length')
+      const total = contentLength ? parseInt(contentLength, 10) : 0
 
-    // Try Web Share API (iOS Safari + Chrome) — opens share sheet for "Save Video"
-    if (navigator.share) {
-      try {
-        setSaveProgress(prev => ({ ...prev, [id]: 0 }))
-        const res = await fetch(fileUrl)
-        const contentLength = res.headers.get('content-length')
-        const total = contentLength ? parseInt(contentLength, 10) : 0
-
-        if (total && res.body) {
-          // Stream with progress tracking
-          const reader = res.body.getReader()
-          const chunks: Uint8Array[] = []
-          let received = 0
-
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            chunks.push(value)
-            received += value.length
-            setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
-          }
-
-          const combined = new Uint8Array(received)
-          let offset = 0
-          for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length }
-          const blob = new Blob([combined])
-          const ext = name.split('.').pop()?.toLowerCase()
-          const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
-          const file = new File([blob], name, { type: mime })
-          setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
-          await navigator.share({ files: [file] })
-        } else {
-          // No content-length — show indeterminate
-          setSaveProgress(prev => ({ ...prev, [id]: -1 }))
-          const blob = await res.blob()
-          const ext = name.split('.').pop()?.toLowerCase()
-          const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
-          const file = new File([blob], name, { type: mime })
-          setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
-          await navigator.share({ files: [file] })
+      let blob: Blob
+      if (total && res.body) {
+        const reader = res.body.getReader()
+        const chunks: Uint8Array[] = []
+        let received = 0
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          chunks.push(value)
+          received += value.length
+          setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
         }
-        return
-      } catch (err: any) {
-        setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
-        if (err?.name === 'AbortError') return
-        return
+        const combined = new Uint8Array(received)
+        let offset = 0
+        for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length }
+        blob = new Blob([combined])
+      } else {
+        setSaveProgress(prev => ({ ...prev, [id]: -1 }))
+        blob = await res.blob()
       }
-    }
 
-    // Fallback: normal browser download (desktop)
+      const ext = name.split('.').pop()?.toLowerCase()
+      const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
+      fileCache.current[id] = new File([blob], name, { type: mime })
+      setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+    } catch {
+      setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+    }
+  }
+
+  // Called from user tap — must be synchronous (no awaits before navigator.share)
+  const handleSaveToPhotos = async (id: string, fileName: string) => {
+    const cached = fileCache.current[id]
+    if (cached) {
+      try {
+        await navigator.share({ files: [cached] })
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return
+      }
+      return
+    }
+    // Not cached yet — fall back to fetching (won't open share sheet due to gesture expiry, but try anyway)
+    prefetchFile(id, fileName)
+  }
+
+  // Desktop fallback — normal browser download
+  const triggerFileDownload = (id: string, fileName: string) => {
+    const fileUrl = `/api/file/${id}`
+    const name = fileName || 'video.mp4'
     const a = document.createElement('a')
     a.href = fileUrl
     a.download = name
@@ -319,6 +327,7 @@ export default function GrabberApp() {
     setError('')
     setDownloads([])
     setSaveProgress({})
+    fileCache.current = {}
     autoTriggered.current = false
 
     // Try to read clipboard and auto-paste
@@ -624,12 +633,19 @@ export default function GrabberApp() {
                               </span>
                             </div>
                           </div>
+                        ) : canShare ? (
+                          <button
+                            onClick={() => handleSaveToPhotos(dl.id, dl.fileName || 'download')}
+                            className="w-full py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
+                          >
+                            {fileCache.current[dl.id] ? 'Save to Photos' : 'Preparing...'}
+                          </button>
                         ) : (
                           <button
                             onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
                             className="w-full py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
                           >
-                            {canShare ? 'Save to Photos' : 'Download Again'}
+                            Download Again
                           </button>
                         )}
                       </div>
@@ -662,7 +678,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 13
+        Build 14
       </footer>
     </div>
   )
