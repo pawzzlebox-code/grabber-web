@@ -119,18 +119,18 @@ export default function GrabberApp() {
       }
     }
 
-    // Check on focus
-    window.addEventListener('focus', checkClipboard)
-    // Also check on visibility change (for mobile)
-    document.addEventListener('visibilitychange', () => {
+    const onVisChange = () => {
       if (document.visibilityState === 'visible') checkClipboard()
-    })
+    }
 
-    // Initial check
+    window.addEventListener('focus', checkClipboard)
+    document.addEventListener('visibilitychange', onVisChange)
+
     checkClipboard()
 
     return () => {
       window.removeEventListener('focus', checkClipboard)
+      document.removeEventListener('visibilitychange', onVisChange)
     }
   }, [settings.autoDetect])
 
@@ -203,6 +203,7 @@ export default function GrabberApp() {
       // Connect to SSE for progress
       const evtSource = new EventSource(`/api/progress/${data.id}`)
       evtSource.onmessage = (event) => {
+        try {
         const msg = JSON.parse(event.data)
         setDownloads(prev => prev.map(d => {
           if (d.id !== data.id) return d
@@ -225,6 +226,7 @@ export default function GrabberApp() {
         if (msg.type === 'done' || msg.type === 'error') {
           evtSource.close()
         }
+        } catch { /* ignore malformed SSE messages */ }
       }
       evtSource.onerror = () => {
         evtSource.close()
@@ -283,6 +285,7 @@ export default function GrabberApp() {
       } catch (err: any) {
         setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
         if (err?.name === 'AbortError') return
+        return
       }
     }
 
@@ -303,7 +306,7 @@ export default function GrabberApp() {
         fetchInfo(text.trim())
       }
     } catch {
-      // Fallback: just focus the input
+      inputRef.current?.focus()
     }
   }
 
@@ -314,6 +317,8 @@ export default function GrabberApp() {
     setUrl('')
     setVideos([])
     setError('')
+    setDownloads([])
+    setSaveProgress({})
     autoTriggered.current = false
 
     // Try to read clipboard and auto-paste
@@ -657,7 +662,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 12
+        Build 13
       </footer>
     </div>
   )
