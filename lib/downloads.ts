@@ -44,6 +44,12 @@ function cookieArgs(): string[] {
   return []
 }
 
+function proxyArgs(): string[] {
+  const proxy = process.env.PROXY_URL
+  if (proxy) return ['--proxy', proxy]
+  return []
+}
+
 function saveCookies(cookiesTxt: string) {
   if (!fs.existsSync(TEMP_DIR)) {
     fs.mkdirSync(TEMP_DIR, { recursive: true })
@@ -128,6 +134,7 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
     const args = [
       '--dump-json',
       '--encoding', 'utf-8',
+      ...proxyArgs(),
       ...cookieArgs(),
     ]
     // Only use --no-playlist for non-Twitter URLs
@@ -200,6 +207,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     '--newline',
     '--encoding', 'utf-8',
     '--no-mtime',
+    ...proxyArgs(),
     ...cookieArgs(),
     '-o', path.join(TEMP_DIR, `${id}_%(title).80B.%(ext)s`),
     '--print', 'after_move:filepath',
