@@ -83,6 +83,7 @@ export default function GrabberApp() {
   const lastClipboard = useRef('')
   const autoTriggered = useRef(false)
   const [canShare, setCanShare] = useState(false)
+  const [saveProgress, setSaveProgress] = useState<Record<string, number>>({})
 
   useEffect(() => {
     setCanShare(typeof navigator !== 'undefined' && !!navigator.share)
@@ -240,18 +241,45 @@ export default function GrabberApp() {
     // Try Web Share API (iOS Safari + Chrome) — opens share sheet for "Save Video"
     if (navigator.share) {
       try {
+        setSaveProgress(prev => ({ ...prev, [id]: 0 }))
         const res = await fetch(fileUrl)
-        const blob = await res.blob()
-        // Force video/mp4 MIME type — some browsers return wrong type from blob
-        const ext = name.split('.').pop()?.toLowerCase()
-        const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
-        const file = new File([blob], name, { type: mime })
-        await navigator.share({ files: [file] })
+        const contentLength = res.headers.get('content-length')
+        const total = contentLength ? parseInt(contentLength, 10) : 0
+
+        if (total && res.body) {
+          // Stream with progress tracking
+          const reader = res.body.getReader()
+          const chunks: Uint8Array[] = []
+          let received = 0
+
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            chunks.push(value)
+            received += value.length
+            setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
+          }
+
+          const blob = new Blob(chunks)
+          const ext = name.split('.').pop()?.toLowerCase()
+          const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
+          const file = new File([blob], name, { type: mime })
+          setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+          await navigator.share({ files: [file] })
+        } else {
+          // No content-length — show indeterminate
+          setSaveProgress(prev => ({ ...prev, [id]: -1 }))
+          const blob = await res.blob()
+          const ext = name.split('.').pop()?.toLowerCase()
+          const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
+          const file = new File([blob], name, { type: mime })
+          setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+          await navigator.share({ files: [file] })
+        }
         return
       } catch (err: any) {
-        // AbortError = user cancelled share sheet — don't fall through
+        setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
         if (err?.name === 'AbortError') return
-        // Other errors — fall through to normal download
       }
     }
 
@@ -569,12 +597,33 @@ export default function GrabberApp() {
 
                     {dl.status === 'done' && (
                       <div className="mt-1.5">
-                        <button
-                          onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
-                          className="w-full py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
-                        >
-                          {canShare ? 'Save to Photos' : 'Download Again'}
-                        </button>
+                        {saveProgress[dl.id] !== undefined ? (
+                          <div className="relative w-full h-9 bg-[#262626] rounded-lg overflow-hidden">
+                            {saveProgress[dl.id] >= 0 ? (
+                              <div
+                                className="absolute inset-y-0 left-0 bg-green-500 transition-all duration-200"
+                                style={{ width: `${saveProgress[dl.id]}%` }}
+                              />
+                            ) : (
+                              <div className="absolute inset-y-0 left-0 right-0 bg-green-500 animate-pulse" />
+                            )}
+                            <div className="relative flex items-center justify-center h-full gap-1.5">
+                              <Loader size={12} className="animate-spin text-white" />
+                              <span className="text-xs font-medium text-white">
+                                {saveProgress[dl.id] >= 0
+                                  ? `Preparing ${saveProgress[dl.id]}%`
+                                  : 'Preparing...'}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
+                            className="w-full py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
+                          >
+                            {canShare ? 'Save to Photos' : 'Download Again'}
+                          </button>
+                        )}
                       </div>
                     )}
 
@@ -605,7 +654,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 11
+        Build 12
       </footer>
     </div>
   )
