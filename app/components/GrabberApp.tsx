@@ -212,7 +212,7 @@ export default function GrabberApp() {
             return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
           }
           if (msg.type === 'done') {
-            if (typeof navigator !== 'undefined' && navigator.share) {
+            if (typeof navigator !== 'undefined' && 'share' in navigator) {
               // Mobile: pre-fetch file into cache so "Save to Photos" tap is instant
               prefetchFile(data.id, msg.fileName)
             } else {
