@@ -260,7 +260,7 @@ export default function GrabberApp() {
             setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
           }
 
-          const blob = new Blob(chunks)
+          const blob = new Blob(chunks.map(c => c.buffer))
           const ext = name.split('.').pop()?.toLowerCase()
           const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
           const file = new File([blob], name, { type: mime })
