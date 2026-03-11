@@ -85,6 +85,7 @@ export default function GrabberApp() {
   const [canShare, setCanShare] = useState(false)
   const [saveProgress, setSaveProgress] = useState<Record<string, number>>({})
   const fileCache = useRef<Record<string, File>>({})
+  const [fileReady, setFileReady] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     setCanShare(typeof navigator !== 'undefined' && !!navigator.share)
@@ -274,7 +275,9 @@ export default function GrabberApp() {
       const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
       fileCache.current[id] = new File([blob], name, { type: mime })
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      setFileReady(prev => ({ ...prev, [id]: true }))
     } catch {
+      // Prefetch failed — clear progress, user can tap to retry
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
     }
   }
@@ -327,6 +330,7 @@ export default function GrabberApp() {
     setError('')
     setDownloads([])
     setSaveProgress({})
+    setFileReady({})
     fileCache.current = {}
     autoTriggered.current = false
 
@@ -633,12 +637,19 @@ export default function GrabberApp() {
                               </span>
                             </div>
                           </div>
-                        ) : canShare ? (
+                        ) : canShare && fileReady[dl.id] ? (
                           <button
                             onClick={() => handleSaveToPhotos(dl.id, dl.fileName || 'download')}
                             className="w-full py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
                           >
-                            {fileCache.current[dl.id] ? 'Save to Photos' : 'Preparing...'}
+                            Save to Photos
+                          </button>
+                        ) : canShare && !fileReady[dl.id] ? (
+                          <button
+                            onClick={() => prefetchFile(dl.id, dl.fileName || 'download')}
+                            className="w-full py-2 bg-[#262626] hover:bg-[#333] rounded-lg text-xs font-medium text-neutral-400 transition-colors"
+                          >
+                            Retry Prepare
                           </button>
                         ) : (
                           <button
@@ -678,7 +689,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 14
+        Build 15
       </footer>
     </div>
   )
