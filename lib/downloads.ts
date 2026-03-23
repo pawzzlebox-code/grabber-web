@@ -127,7 +127,26 @@ function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
   return formats
 }
 
+function isChannelOrPlaylist(url: string): boolean {
+  try {
+    const u = new URL(url)
+    const host = u.hostname.replace('www.', '')
+    const p = u.pathname.toLowerCase()
+    if (host === 'youtube.com' || host === 'youtu.be') {
+      // Channel URLs: /@user, /c/name, /channel/id, /user/name
+      if (p.startsWith('/@') || p.startsWith('/c/') || p.startsWith('/channel/') || p.startsWith('/user/')) return true
+      // Pure playlist URL (not a video with list param)
+      if (p === '/playlist') return true
+    }
+    return false
+  } catch { return false }
+}
+
 export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
+  if (isChannelOrPlaylist(url)) {
+    throw new Error('Channel and playlist URLs are not supported. Please paste a link to a specific video.')
+  }
+
   const twitter = isTwitterUrl(url)
 
   return new Promise((resolve, reject) => {
@@ -148,10 +167,17 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
     let stdout = ''
     let stderr = ''
 
+    // Timeout after 30 seconds for fetching info
+    const timeout = setTimeout(() => {
+      proc.kill()
+      reject(new Error('Timed out fetching video info. Check the URL and try again.'))
+    }, 30000)
+
     proc.stdout.on('data', (data: Buffer) => { stdout += data.toString('utf-8') })
     proc.stderr.on('data', (data: Buffer) => { stderr += data.toString('utf-8') })
 
     proc.on('close', (code) => {
+      clearTimeout(timeout)
       if (code !== 0) {
         console.error('[info] yt-dlp failed:', stderr.slice(0, 500))
         reject(new Error(stderr.split('\n').pop()?.trim() || `yt-dlp exited with code ${code}`))

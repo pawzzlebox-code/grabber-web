@@ -689,7 +689,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 15
+        Build 16
       </footer>
     </div>
   )
