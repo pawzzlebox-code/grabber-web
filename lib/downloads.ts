@@ -44,17 +44,43 @@ function cookieArgs(): string[] {
   return []
 }
 
-function proxyArgs(): string[] {
+function proxyArgs(url?: string): string[] {
   const proxy = process.env.PROXY_URL
-  if (proxy) return ['--proxy', proxy]
-  return []
+  if (!proxy) return []
+  // Skip proxy for sites where the Indian proxy causes issues
+  if (url) {
+    try {
+      const host = new URL(url).hostname.replace('www.', '')
+      if (['twitter.com', 'x.com', 't.co', 'instagram.com'].includes(host)) return []
+    } catch {}
+  }
+  return ['--proxy', proxy]
 }
 
-function saveCookies(cookiesTxt: string) {
+export function saveCookies(cookiesTxt: string) {
   if (!fs.existsSync(TEMP_DIR)) {
     fs.mkdirSync(TEMP_DIR, { recursive: true })
   }
-  fs.writeFileSync(COOKIE_FILE, cookiesTxt, 'utf-8')
+  // Merge with existing cookies instead of overwriting
+  const existingCookies = new Map<string, string>()
+  if (fs.existsSync(COOKIE_FILE)) {
+    for (const line of fs.readFileSync(COOKIE_FILE, 'utf-8').split('\n')) {
+      if (line.startsWith('#') || !line.trim()) continue
+      const parts = line.split('\t')
+      if (parts.length >= 7) {
+        existingCookies.set(`${parts[0]}|${parts[5]}|${parts[2]}`, line)
+      }
+    }
+  }
+  for (const line of cookiesTxt.split('\n')) {
+    if (line.startsWith('#') || !line.trim()) continue
+    const parts = line.split('\t')
+    if (parts.length >= 7) {
+      existingCookies.set(`${parts[0]}|${parts[5]}|${parts[2]}`, line)
+    }
+  }
+  const merged = '# Netscape HTTP Cookie File\n' + Array.from(existingCookies.values()).join('\n') + '\n'
+  fs.writeFileSync(COOKIE_FILE, merged, 'utf-8')
 }
 
 // Ensure temp dir exists
@@ -153,7 +179,7 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
     const args = [
       '--dump-json',
       '--encoding', 'utf-8',
-      ...proxyArgs(),
+      ...proxyArgs(url),
       ...cookieArgs(),
     ]
     // Only use --no-playlist for non-Twitter URLs
@@ -216,6 +242,21 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
   })
 }
 
+const MAX_RETRIES = 2
+const RETRY_DELAY_MS = 3000
+const NON_RETRYABLE = ['login required', 'private video', 'not available', 'requires authentication', 'cookies']
+
+function isRetryable(stderr: string): boolean {
+  const lower = stderr.toLowerCase()
+  return !NON_RETRYABLE.some(s => lower.includes(s))
+}
+
+function extractError(stderr: string, code: number | null): string {
+  const errorLine = stderr.split('\n').filter(l => l.includes('ERROR')).pop()
+    || stderr.trim().split('\n').pop() || ''
+  return errorLine.trim() || `Download failed (exit code ${code})`
+}
+
 export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number): DownloadJob {
   const job: DownloadJob = {
     id, url,
@@ -229,86 +270,94 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   downloads.set(id, job)
 
   const twitter = isTwitterUrl(url)
-  const args = [
+  const baseArgs = [
     '--newline',
     '--encoding', 'utf-8',
     '--no-mtime',
-    ...proxyArgs(),
+    ...proxyArgs(url),
     ...cookieArgs(),
     '-o', path.join(TEMP_DIR, `${id}_%(title).80B.%(ext)s`),
     '--print', 'after_move:filepath',
   ]
 
   if (!twitter) {
-    args.push('--no-playlist')
+    baseArgs.push('--no-playlist')
   } else if (playlistIndex !== undefined) {
-    // Download specific video from multi-video tweet (1-indexed)
-    args.push('--playlist-items', String(playlistIndex))
+    baseArgs.push('--playlist-items', String(playlistIndex))
   }
 
   const defaultFmt = twitter ? 'b' : 'bv*+ba/b'
-  if (formatId) {
-    args.push('-f', formatId)
-  } else {
-    args.push('-f', defaultFmt)
+  baseArgs.push('-f', formatId || defaultFmt)
+  baseArgs.push(url)
+
+  function attemptDownload(attempt: number) {
+    const proc = spawn('yt-dlp', baseArgs, {
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+    })
+
+    job.process = proc
+    job.percent = 0
+    job.speed = ''
+    job.eta = ''
+    let lastLine = ''
+    let stderrOutput = ''
+
+    proc.stdout.on('data', (data: Buffer) => {
+      const text = data.toString('utf-8')
+      for (const line of text.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        lastLine = trimmed
+
+        const match = trimmed.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/)
+        if (match) {
+          job.percent = parseFloat(match[1])
+          job.totalSize = match[2]
+          job.speed = match[3]
+          job.eta = match[4]
+          notify(job, { type: 'progress', percent: job.percent, totalSize: job.totalSize, speed: job.speed, eta: job.eta })
+        }
+      }
+    })
+
+    proc.stderr.on('data', (data: Buffer) => {
+      const text = data.toString('utf-8').trim()
+      stderrOutput += text + '\n'
+      console.error('[yt-dlp]', text)
+    })
+
+    proc.on('close', (code) => {
+      job.process = undefined
+      if (code === 0 && lastLine && !lastLine.startsWith('[')) {
+        job.filePath = lastLine.trim()
+        job.fileName = path.basename(job.filePath)
+        job.status = 'done'
+        job.percent = 100
+        notify(job, { type: 'done', fileName: job.fileName })
+      } else if (attempt < MAX_RETRIES && isRetryable(stderrOutput)) {
+        // Retry after delay
+        const nextAttempt = attempt + 1
+        console.log(`[yt-dlp] Retrying (${nextAttempt + 1}/${MAX_RETRIES + 1})...`)
+        notify(job, { type: 'retry', attempt: nextAttempt + 1, maxRetries: MAX_RETRIES + 1 })
+        setTimeout(() => attemptDownload(nextAttempt), RETRY_DELAY_MS * (nextAttempt))
+      } else {
+        job.status = 'error'
+        job.error = extractError(stderrOutput, code)
+        notify(job, { type: 'error', message: job.error })
+      }
+    })
   }
 
-  args.push(url)
-
-  const proc = spawn('yt-dlp', args, {
-    env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
-  })
-
-  job.process = proc
-  let lastLine = ''
-
-  proc.stdout.on('data', (data: Buffer) => {
-    const text = data.toString('utf-8')
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      lastLine = trimmed
-
-      // Progress: [download]  45.2% of ~150.00MiB at 5.20MiB/s ETA 00:15
-      const match = trimmed.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/)
-      if (match) {
-        job.percent = parseFloat(match[1])
-        job.totalSize = match[2]
-        job.speed = match[3]
-        job.eta = match[4]
-        notify(job, { type: 'progress', percent: job.percent, totalSize: job.totalSize, speed: job.speed, eta: job.eta })
-      }
-    }
-  })
-
-  proc.stderr.on('data', (data: Buffer) => {
-    console.error('[yt-dlp]', data.toString('utf-8').trim())
-  })
-
-  proc.on('close', (code) => {
-    job.process = undefined
-    if (code === 0 && lastLine && !lastLine.startsWith('[')) {
-      job.filePath = lastLine.trim()
-      job.fileName = path.basename(job.filePath)
-      job.status = 'done'
-      job.percent = 100
-      notify(job, { type: 'done', fileName: job.fileName })
-    } else {
-      job.status = 'error'
-      job.error = `Download failed (exit code ${code})`
-      notify(job, { type: 'error', message: job.error })
-    }
-  })
-
+  attemptDownload(0)
   return job
 }
 
 export function startDownloadWithCookies(id: string, url: string, cookiesTxt?: string): DownloadJob {
-  // Save fresh cookies from extension
   if (cookiesTxt) {
     saveCookies(cookiesTxt)
   }
-  return startDownload(id, url, 'bv*+ba/b')
+  const defaultFmt = isTwitterUrl(url) ? 'b' : 'bv*+ba/b'
+  return startDownload(id, url, defaultFmt)
 }
 
 export function cancelDownload(id: string) {

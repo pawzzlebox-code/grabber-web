@@ -88,7 +88,17 @@ export default function GrabberApp() {
   const [fileReady, setFileReady] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
-    setCanShare(typeof navigator !== 'undefined' && !!navigator.share)
+    // Check if browser supports sharing files (not just text/URLs)
+    // navigator.share exists on desktop Chrome too, but canShare({files}) is mobile-only
+    try {
+      const testFile = new File([''], 'test.mp4', { type: 'video/mp4' })
+      const supported = typeof navigator !== 'undefined'
+        && !!navigator.canShare
+        && navigator.canShare({ files: [testFile] })
+      setCanShare(supported)
+    } catch {
+      setCanShare(false)
+    }
   }, [])
 
   // Load settings on mount
@@ -211,6 +221,9 @@ export default function GrabberApp() {
           if (d.id !== data.id) return d
           if (msg.type === 'progress') {
             return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
+          }
+          if (msg.type === 'retry') {
+            return { ...d, percent: 0, speed: `Retrying (${msg.attempt}/${msg.maxRetries})...`, eta: '', totalSize: '' }
           }
           if (msg.type === 'done') {
             if (typeof navigator !== 'undefined' && 'share' in navigator) {
@@ -689,7 +702,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 16
+        Build 17
       </footer>
     </div>
   )

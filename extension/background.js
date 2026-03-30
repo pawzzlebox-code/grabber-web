@@ -19,24 +19,40 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'grab') {
     sendToGrabber(msg.url).then(sendResponse)
-    return true // async response
+    return true
+  }
+  if (msg.action === 'syncCookies') {
+    syncCookiesToDesktop().then(sendResponse)
+    return true
+  }
+})
+
+// Auto-sync cookies when visiting YouTube (keeps desktop app's cookie file fresh)
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url) {
+    try {
+      const host = new URL(tab.url).hostname
+      if (host.includes('youtube.com') || host.includes('youtu.be')) {
+        await syncCookiesToDesktop('youtube.com')
+      } else if (host.includes('instagram.com')) {
+        await syncCookiesToDesktop('instagram.com')
+      } else if (host.includes('twitter.com') || host.includes('x.com')) {
+        await syncCookiesToDesktop('twitter.com')
+      }
+    } catch {}
   }
 })
 
 async function sendToGrabber(videoUrl) {
   try {
-    // Get server URL from storage
     const { serverUrl } = await chrome.storage.sync.get({ serverUrl: 'http://localhost:3000' })
-
-    // Extract domain from video URL for cookies
     const urlObj = new URL(videoUrl)
     const domain = urlObj.hostname
 
-    // Get cookies for the video site
     const cookies = await getCookiesForDomain(domain)
     const cookiesTxt = toCookiesTxt(cookies)
 
-    // Send to Grabber server
+    // Send to web app server
     const res = await fetch(`${serverUrl}/api/grab`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -46,17 +62,46 @@ async function sendToGrabber(videoUrl) {
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || 'Failed')
 
+    // Also sync cookies to desktop app if running
+    syncCookiesToDesktop(domain).catch(() => {})
+
     return { success: true, id: data.id }
   } catch (err) {
     return { success: false, error: err.message }
   }
 }
 
-async function getCookiesForDomain(hostname) {
-  // Get cookies for the domain and common subdomains
-  const domains = [hostname]
+async function syncCookiesToDesktop(domain) {
+  const targetDomain = domain || 'youtube.com'
+  const cookies = await getCookiesForDomain(targetDomain)
+  const cookiesTxt = toCookiesTxt(cookies)
 
-  // Add parent domain (e.g., .youtube.com from www.youtube.com)
+  // Sync to desktop app (localhost)
+  try {
+    const res = await fetch('http://127.0.0.1:9876/cookies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookies: cookiesTxt })
+    })
+    if (res.ok) console.log('[Grabber Helper] Cookies synced to desktop app')
+  } catch {}
+
+  // Sync to web server (Railway)
+  try {
+    const { serverUrl } = await chrome.storage.sync.get({ serverUrl: 'http://localhost:3000' })
+    await fetch(`${serverUrl}/api/cookies`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookies: cookiesTxt })
+    })
+    console.log('[Grabber Helper] Cookies synced to web server')
+  } catch {}
+
+  return { success: true }
+}
+
+async function getCookiesForDomain(hostname) {
+  const domains = [hostname]
   const parts = hostname.split('.')
   if (parts.length > 2) {
     domains.push('.' + parts.slice(-2).join('.'))
