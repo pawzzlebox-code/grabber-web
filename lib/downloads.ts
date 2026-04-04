@@ -168,7 +168,7 @@ function isChannelOrPlaylist(url: string): boolean {
   } catch { return false }
 }
 
-export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
+export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInfo[]> {
   if (isChannelOrPlaylist(url)) {
     throw new Error('Channel and playlist URLs are not supported. Please paste a link to a specific video.')
   }
@@ -205,8 +205,18 @@ export async function fetchVideoInfo(url: string): Promise<VideoInfo[]> {
     proc.on('close', (code) => {
       clearTimeout(timeout)
       if (code !== 0) {
-        console.error('[info] yt-dlp failed:', stderr.slice(0, 500))
-        reject(new Error(stderr.split('\n').pop()?.trim() || `yt-dlp exited with code ${code}`))
+        console.error('[info] yt-dlp failed (attempt ' + (attempt + 1) + '):', stderr.slice(0, 500))
+        // Retry up to 2 more times for transient errors
+        if (attempt < MAX_RETRIES && isRetryable(stderr)) {
+          console.log(`[info] Retrying (${attempt + 2}/${MAX_RETRIES + 1})...`)
+          setTimeout(() => {
+            fetchVideoInfo(url, attempt + 1).then(resolve).catch(reject)
+          }, RETRY_DELAY_MS * (attempt + 1))
+          return
+        }
+        const errorLine = stderr.split('\n').filter(l => l.includes('ERROR')).pop()
+          || stderr.trim().split('\n').pop() || ''
+        reject(new Error(errorLine.trim() || `yt-dlp exited with code ${code}`))
         return
       }
       try {

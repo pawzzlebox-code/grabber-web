@@ -88,10 +88,10 @@ async function syncCookiesToDesktop(domain) {
 
   // Sync to web server (Railway)
   try {
-    const { serverUrl } = await chrome.storage.sync.get({ serverUrl: 'http://localhost:3000' })
+    const { serverUrl, cookieKey } = await chrome.storage.sync.get({ serverUrl: 'http://localhost:3000', cookieKey: '' })
     await fetch(`${serverUrl}/api/cookies`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-cookie-key': cookieKey },
       body: JSON.stringify({ cookies: cookiesTxt })
     })
     console.log('[Grabber Helper] Cookies synced to web server')

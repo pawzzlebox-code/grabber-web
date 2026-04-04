@@ -12,13 +12,45 @@ function isVideoUrl(url) {
 }
 
 async function init() {
-  // Load server URL
-  const { serverUrl } = await chrome.storage.sync.get({ serverUrl: 'http://localhost:3000' })
+  // Load settings
+  const { serverUrl, cookieKey } = await chrome.storage.sync.get({ serverUrl: 'http://localhost:3000', cookieKey: '' })
   document.getElementById('server-url').value = serverUrl
+  document.getElementById('cookie-key').value = cookieKey
 
-  // Save server URL on change
+  // Save settings on change
   document.getElementById('server-url').addEventListener('change', (e) => {
     chrome.storage.sync.set({ serverUrl: e.target.value.replace(/\/+$/, '') })
+  })
+  document.getElementById('cookie-key').addEventListener('change', (e) => {
+    chrome.storage.sync.set({ cookieKey: e.target.value.trim() })
+  })
+
+  // Sync cookies button
+  document.getElementById('sync-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('sync-btn')
+    const status = document.getElementById('sync-status')
+    btn.disabled = true
+    btn.innerHTML = 'Syncing...'
+
+    const domains = ['youtube.com', 'instagram.com', 'twitter.com']
+    let ok = true
+    for (const d of domains) {
+      const result = await chrome.runtime.sendMessage({ action: 'syncCookies', domain: d })
+      if (!result?.success) ok = false
+    }
+
+    status.style.display = 'block'
+    if (ok) {
+      status.className = 'status success'
+      status.textContent = 'Cookies synced for YouTube, Instagram & Twitter!'
+      btn.innerHTML = 'Synced!'
+    } else {
+      status.className = 'status error'
+      status.textContent = 'Some cookies failed to sync'
+      btn.innerHTML = 'Retry Sync'
+    }
+    btn.disabled = false
+    setTimeout(() => { status.style.display = 'none' }, 3000)
   })
 
   // Get current tab URL
