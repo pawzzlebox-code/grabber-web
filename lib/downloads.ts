@@ -178,6 +178,7 @@ export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInf
   return new Promise((resolve, reject) => {
     const args = [
       '--dump-json',
+      '--no-check-formats',
       '--encoding', 'utf-8',
       ...proxyArgs(url),
       ...cookieArgs(),
@@ -284,6 +285,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     '--newline',
     '--encoding', 'utf-8',
     '--no-mtime',
+    '--no-check-formats',
     ...proxyArgs(url),
     ...cookieArgs(),
     '-o', path.join(TEMP_DIR, `${id}_%(title).80B.%(ext)s`),
