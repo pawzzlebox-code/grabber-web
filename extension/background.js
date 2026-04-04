@@ -1,10 +1,22 @@
-// Create context menu on install
+// Create context menu + cookie sync alarm on install
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: 'grabber-download',
     title: 'Download with Grabber',
     contexts: ['page', 'link', 'video', 'audio']
   })
+  // Auto-sync cookies every 10 minutes
+  chrome.alarms.create('cookie-sync', { periodInMinutes: 10 })
+})
+
+// Handle cookie sync alarm
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'cookie-sync') {
+    for (const domain of ['youtube.com', 'instagram.com', 'twitter.com']) {
+      await syncCookiesToDesktop(domain)
+    }
+    console.log('[Grabber Helper] Auto-synced cookies')
+  }
 })
 
 // Handle context menu click

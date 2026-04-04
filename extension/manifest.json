@@ -3,7 +3,7 @@
   "name": "Grabber Helper",
   "description": "One-click video downloads via Grabber",
   "version": "1.0.0",
-  "permissions": ["cookies", "activeTab", "contextMenus", "storage"],
+  "permissions": ["cookies", "activeTab", "tabs", "contextMenus", "storage", "alarms"],
   "host_permissions": ["*://*.youtube.com/*", "*://*.youtu.be/*", "*://*.tiktok.com/*", "*://*.instagram.com/*", "*://*.twitter.com/*", "*://*.x.com/*", "*://*.vimeo.com/*", "*://*.reddit.com/*", "*://*.twitch.tv/*", "*://*.facebook.com/*", "*://*.dailymotion.com/*"],
   "action": {
     "default_popup": "popup.html",
