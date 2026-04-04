@@ -34,7 +34,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true
   }
   if (msg.action === 'syncCookies') {
-    syncCookiesToDesktop().then(sendResponse)
+    syncCookiesToDesktop(msg.domain).then(sendResponse)
     return true
   }
 })
@@ -101,13 +101,21 @@ async function syncCookiesToDesktop(domain) {
   // Sync to web server (Railway)
   try {
     const { serverUrl, cookieKey } = await chrome.storage.sync.get({ serverUrl: 'http://localhost:3000', cookieKey: '' })
-    await fetch(`${serverUrl}/api/cookies`, {
+    const serverRes = await fetch(`${serverUrl}/api/cookies`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-cookie-key': cookieKey },
       body: JSON.stringify({ cookies: cookiesTxt })
     })
+    if (!serverRes.ok) {
+      const err = await serverRes.json().catch(() => ({}))
+      console.error('[Grabber Helper] Server sync failed:', serverRes.status, err.error)
+      return { success: false, error: `Server: ${err.error || serverRes.status}` }
+    }
     console.log('[Grabber Helper] Cookies synced to web server')
-  } catch {}
+  } catch (err) {
+    console.error('[Grabber Helper] Server sync error:', err.message)
+    return { success: false, error: err.message }
+  }
 
   return { success: true }
 }
