@@ -127,8 +127,8 @@ function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
   const seen = new Set<string>()
   const formats: VideoInfo['formats'] = []
 
-  // Best quality — use 'b' for Twitter (pre-merged MP4s), 'bv*+ba/b' for others
-  const bestFormat = twitter ? 'b' : 'bv*+ba/b'
+  // Best quality — use 'b' for Twitter (pre-merged MP4s), broader fallback for others
+  const bestFormat = twitter ? 'b' : 'bestvideo*+bestaudio/best'
   formats.push({ formatId: bestFormat, label: 'Best Quality', ext: 'mp4', filesize: undefined })
 
   const videoFormats = (json.formats || [])
@@ -141,7 +141,7 @@ function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
       seen.add(key)
       const fmtId = twitter
         ? `b[height<=${f.height}]`
-        : `bv[height<=${f.height}]+ba/b[height<=${f.height}]`
+        : `bestvideo[height<=${f.height}]+bestaudio/best[height<=${f.height}]`
       formats.push({ formatId: fmtId, label: key, ext: f.ext || 'mp4', filesize: f.filesize || undefined })
     }
   }
@@ -296,7 +296,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     baseArgs.push('--playlist-items', String(playlistIndex))
   }
 
-  const defaultFmt = twitter ? 'b' : 'bv*+ba/b'
+  const defaultFmt = twitter ? 'b' : 'bestvideo*+bestaudio/best'
   baseArgs.push('-f', formatId || defaultFmt)
   baseArgs.push(url)
 
