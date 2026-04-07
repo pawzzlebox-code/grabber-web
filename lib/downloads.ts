@@ -308,7 +308,7 @@ function convertToVertical(job: DownloadJob): void {
     // Run ffmpeg — pad to 9:16 without scaling
     const ffmpegArgs = [
       '-i', inputPath,
-      '-vf', 'pad=iw:iw*16/9:0:(oh-ih)/2:black',
+      '-vf', 'pad=iw:ceil(iw*16/9/2)*2:0:(oh-ih)/2:black',
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-threads', '0',
       '-c:a', 'copy',
       '-y',
@@ -346,8 +346,10 @@ function convertToVertical(job: DownloadJob): void {
         job.percent = 100
         notify(job, { type: 'done', fileName: job.fileName })
       } else {
-        // Conversion failed — serve original as fallback
-        console.error('[ffmpeg] conversion failed:', stderrBuf.slice(-500))
+        // Conversion failed — serve original as fallback but log error
+        console.error('[ffmpeg] conversion failed (code ' + code + '):', stderrBuf.slice(-1000))
+        // Clean up failed output
+        try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch {}
         job.status = 'done'
         job.percent = 100
         notify(job, { type: 'done', fileName: job.fileName! })
