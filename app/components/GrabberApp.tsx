@@ -20,7 +20,7 @@ interface DownloadJob {
   id: string
   title: string
   thumbnail: string
-  status: 'downloading' | 'done' | 'error'
+  status: 'downloading' | 'converting' | 'done' | 'error'
   percent: number
   speed: string
   eta: string
@@ -32,7 +32,7 @@ interface DownloadJob {
 }
 
 // Persist settings in localStorage
-const defaultSettings = { autoDetect: true, autoBest: false }
+const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -195,6 +195,8 @@ export default function GrabberApp() {
           title: video.title,
           thumbnail: video.thumbnail,
           playlistIndex: video.playlistIndex,
+          verticalPad: settings.verticalPad,
+          duration: video.duration,
         }),
       })
       const data = await res.json()
@@ -224,6 +226,9 @@ export default function GrabberApp() {
           }
           if (msg.type === 'retry') {
             return { ...d, percent: 0, speed: `Retrying (${msg.attempt}/${msg.maxRetries})...`, eta: '', totalSize: '' }
+          }
+          if (msg.type === 'converting') {
+            return { ...d, status: 'converting' as any, percent: msg.percent, speed: 'Converting to 9:16...', eta: '', totalSize: '' }
           }
           if (msg.type === 'done') {
             if (typeof navigator !== 'undefined' && 'share' in navigator) {
@@ -422,6 +427,22 @@ export default function GrabberApp() {
             </label>
           </div>
 
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-white">Pad to 9:16 vertical</p>
+              <p className="text-[11px] text-neutral-500">Adds black bars for Reels/TikTok</p>
+            </div>
+            <label className="relative inline-flex cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.verticalPad}
+                onChange={(e) => setSettings(s => ({ ...s, verticalPad: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-purple-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+            </label>
+          </div>
+
           <div className="pt-1">
             <p className="text-[10px] text-neutral-600">
               Install the Grabber Helper Chrome extension for YouTube support
@@ -593,13 +614,16 @@ export default function GrabberApp() {
                         {dl.status === 'downloading' && (
                           <Loader size={12} className="animate-spin text-sky-500" />
                         )}
+                        {dl.status === 'converting' && (
+                          <Loader size={12} className="animate-spin text-purple-500" />
+                        )}
                         {dl.status === 'done' && (
                           <CheckCircle size={12} className="text-green-500" />
                         )}
                         {dl.status === 'error' && (
                           <AlertCircle size={12} className="text-red-500" />
                         )}
-                        {dl.status !== 'downloading' && (
+                        {dl.status !== 'downloading' && dl.status !== 'converting' && (
                           <button
                             onClick={() => removeDownload(dl.id)}
                             className="p-0.5 text-neutral-600 hover:text-neutral-300 transition-colors"
@@ -612,11 +636,11 @@ export default function GrabberApp() {
 
                     <p className="text-[10px] text-neutral-500">{dl.formatLabel}</p>
 
-                    {dl.status === 'downloading' && (
+                    {(dl.status === 'downloading' || dl.status === 'converting') && (
                       <>
                         <div className="mt-1.5 w-full bg-[#262626] rounded-full h-1">
                           <div
-                            className="bg-sky-500 h-1 rounded-full transition-all duration-300"
+                            className={`h-1 rounded-full transition-all duration-300 ${dl.status === 'converting' ? 'bg-purple-500' : 'bg-sky-500'}`}
                             style={{ width: `${dl.percent}%` }}
                           />
                         </div>
@@ -702,7 +726,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 18
+        Build 19
       </footer>
     </div>
   )

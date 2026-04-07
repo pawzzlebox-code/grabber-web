@@ -18,7 +18,7 @@ export interface DownloadJob {
   url: string
   title: string
   thumbnail: string
-  status: 'pending' | 'downloading' | 'done' | 'error'
+  status: 'pending' | 'downloading' | 'converting' | 'done' | 'error'
   percent: number
   speed: string
   eta: string
@@ -29,6 +29,7 @@ export interface DownloadJob {
   listeners: Set<(data: any) => void>
   createdAt: number
   process?: ChildProcess
+  duration?: number
 }
 
 const downloads = new Map<string, DownloadJob>()
@@ -55,6 +56,15 @@ function proxyArgs(url?: string): string[] {
     } catch {}
   }
   return ['--proxy', proxy]
+}
+
+export function getCookieStatus(): { exists: boolean; lines: number; domains: string[]; lastModified?: string } {
+  if (!fs.existsSync(COOKIE_FILE)) return { exists: false, lines: 0, domains: [] }
+  const content = fs.readFileSync(COOKIE_FILE, 'utf-8')
+  const lines = content.split('\n').filter(l => l.trim() && !l.startsWith('#'))
+  const domains = [...new Set(lines.map(l => l.split('\t')[0]).filter(Boolean))]
+  const stat = fs.statSync(COOKIE_FILE)
+  return { exists: true, lines: lines.length, domains, lastModified: stat.mtime.toISOString() }
 }
 
 export function saveCookies(cookiesTxt: string) {
@@ -268,7 +278,84 @@ function extractError(stderr: string, code: number | null): string {
   return errorLine.trim() || `Download failed (exit code ${code})`
 }
 
-export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number): DownloadJob {
+function convertToVertical(job: DownloadJob): void {
+  const inputPath = job.filePath!
+  const ext = path.extname(inputPath)
+  const outputPath = inputPath.replace(ext, `_vertical.mp4`)
+
+  // First check if video is already 9:16 or taller using ffprobe
+  const probe = spawn('ffprobe', [
+    '-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height',
+    '-of', 'csv=p=0', inputPath,
+  ])
+  let probeOut = ''
+  probe.stdout.on('data', (d: Buffer) => { probeOut += d.toString() })
+  probe.on('close', (probeCode) => {
+    const [wStr, hStr] = probeOut.trim().split(',')
+    const w = parseInt(wStr) || 0
+    const h = parseInt(hStr) || 0
+
+    // Skip if already 9:16 or taller (aspect ratio <= 0.5625)
+    if (w > 0 && h > 0 && w / h <= 9 / 16 + 0.01) {
+      job.status = 'done'
+      job.percent = 100
+      notify(job, { type: 'done', fileName: job.fileName! })
+      return
+    }
+
+    // Run ffmpeg — pad to 9:16 without scaling
+    const ffmpegArgs = [
+      '-i', inputPath,
+      '-vf', 'pad=iw:iw*16/9:0:(oh-ih)/2:black',
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+      '-c:a', 'copy',
+      '-y',
+      '-progress', 'pipe:1',
+      outputPath,
+    ]
+
+    const proc = spawn('ffmpeg', ffmpegArgs)
+    job.process = proc
+    job.status = 'converting'
+    job.percent = 0
+    notify(job, { type: 'converting', percent: 0 })
+
+    proc.stdout.on('data', (data: Buffer) => {
+      const text = data.toString()
+      const timeMatch = text.match(/out_time_ms=(\d+)/)
+      if (timeMatch && job.duration && job.duration > 0) {
+        const currentSec = parseInt(timeMatch[1]) / 1000000
+        const pct = Math.min(99, Math.round((currentSec / job.duration) * 100))
+        job.percent = pct
+        notify(job, { type: 'converting', percent: pct })
+      }
+    })
+
+    let stderrBuf = ''
+    proc.stderr.on('data', (data: Buffer) => { stderrBuf += data.toString() })
+
+    proc.on('close', (code) => {
+      job.process = undefined
+      if (code === 0 && fs.existsSync(outputPath)) {
+        try { fs.unlinkSync(inputPath) } catch {}
+        job.filePath = outputPath
+        job.fileName = path.basename(outputPath)
+        job.status = 'done'
+        job.percent = 100
+        notify(job, { type: 'done', fileName: job.fileName })
+      } else {
+        // Conversion failed — serve original as fallback
+        console.error('[ffmpeg] conversion failed:', stderrBuf.slice(-500))
+        job.status = 'done'
+        job.percent = 100
+        notify(job, { type: 'done', fileName: job.fileName! })
+      }
+    })
+  })
+}
+
+export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number, verticalPad?: boolean, duration?: number): DownloadJob {
   const job: DownloadJob = {
     id, url,
     title: title || 'Downloading...',
@@ -277,6 +364,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     percent: 0, speed: '', eta: '', totalSize: '',
     listeners: new Set(),
     createdAt: Date.now(),
+    duration: duration || 0,
   }
   downloads.set(id, job)
 
@@ -343,9 +431,14 @@ export function startDownload(id: string, url: string, formatId?: string, title?
       if (code === 0 && lastLine && !lastLine.startsWith('[')) {
         job.filePath = lastLine.trim()
         job.fileName = path.basename(job.filePath)
-        job.status = 'done'
-        job.percent = 100
-        notify(job, { type: 'done', fileName: job.fileName })
+        // If vertical pad requested and not audio-only, convert
+        if (verticalPad && formatId !== 'ba') {
+          convertToVertical(job)
+        } else {
+          job.status = 'done'
+          job.percent = 100
+          notify(job, { type: 'done', fileName: job.fileName })
+        }
       } else if (attempt < MAX_RETRIES && isRetryable(stderrOutput)) {
         // Retry after delay
         const nextAttempt = attempt + 1
