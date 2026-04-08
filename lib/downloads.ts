@@ -283,52 +283,74 @@ function convertToVertical(job: DownloadJob): void {
   const inputPath = job.filePath!
   const outputPath = inputPath.replace(/\.[^.]+$/, '_vertical.mp4')
 
-  // Get video dimensions with ffprobe
+  function log(msg: string) {
+    console.log('[ffmpeg]', msg)
+    notify(job, { type: 'log', message: msg })
+  }
+
+  log(`Input: ${inputPath}`)
+  log(`File exists: ${fs.existsSync(inputPath)}`)
+
   const probe = spawn('ffprobe', [
     '-v', 'error', '-select_streams', 'v:0',
     '-show_entries', 'stream=width,height',
     '-of', 'csv=p=0', inputPath,
   ])
   let probeOut = ''
+  let probeErr = ''
   probe.stdout.on('data', (d: Buffer) => { probeOut += d.toString() })
-  probe.on('close', () => {
+  probe.stderr.on('data', (d: Buffer) => { probeErr += d.toString() })
+  probe.on('error', (err) => {
+    log(`ffprobe spawn error: ${err.message}`)
+    job.status = 'done'
+    job.percent = 100
+    notify(job, { type: 'done', fileName: job.fileName! })
+  })
+  probe.on('close', (probeCode) => {
+    log(`ffprobe exit code: ${probeCode}, stdout: "${probeOut.trim()}", stderr: "${probeErr.trim()}"`)
+
     const [wStr, hStr] = probeOut.trim().split(',')
     const w = parseInt(wStr) || 0
     const h = parseInt(hStr) || 0
 
     if (w === 0 || h === 0) {
-      // Can't detect dimensions — serve original
-      console.error('[ffmpeg] ffprobe failed, serving original')
+      log(`Cannot detect dimensions (w=${w}, h=${h}), serving original`)
       job.status = 'done'
       job.percent = 100
       notify(job, { type: 'done', fileName: job.fileName! })
       return
     }
 
-    // Skip if already 9:16 or taller
+    log(`Detected: ${w}x${h}, ratio: ${(w/h).toFixed(3)}`)
+
     if (w / h <= 9 / 16 + 0.01) {
+      log(`Already vertical (ratio ${(w/h).toFixed(3)} <= 0.5725), skipping`)
       job.status = 'done'
       job.percent = 100
       notify(job, { type: 'done', fileName: job.fileName! })
       return
     }
 
-    // Calculate exact padded height (9:16 ratio, must be even)
     const targetH = Math.ceil((w * 16 / 9) / 2) * 2
     const yOffset = Math.floor((targetH - h) / 2)
+    const vf = `pad=${w}:${targetH}:0:${yOffset}:black`
 
-    console.log(`[ffmpeg] Padding ${w}x${h} -> ${w}x${targetH} (y offset: ${yOffset})`)
+    log(`Padding: ${w}x${h} -> ${w}x${targetH}, yOffset=${yOffset}, filter="${vf}"`)
+    log(`Output: ${outputPath}`)
 
-    const proc = spawn('ffmpeg', [
+    const ffmpegArgs = [
       '-i', inputPath,
-      '-vf', `pad=${w}:${targetH}:0:${yOffset}:black`,
+      '-vf', vf,
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
       '-c:a', 'copy',
       '-movflags', '+faststart',
       '-y',
       '-progress', 'pipe:1',
       outputPath,
-    ])
+    ]
+    log(`Command: ffmpeg ${ffmpegArgs.join(' ')}`)
+
+    const proc = spawn('ffmpeg', ffmpegArgs)
     job.process = proc
     job.status = 'converting'
     job.percent = 0
@@ -348,9 +370,22 @@ function convertToVertical(job: DownloadJob): void {
     let stderrBuf = ''
     proc.stderr.on('data', (data: Buffer) => { stderrBuf += data.toString() })
 
+    proc.on('error', (err) => {
+      log(`ffmpeg spawn error: ${err.message}`)
+      job.process = undefined
+      job.status = 'done'
+      job.percent = 100
+      notify(job, { type: 'done', fileName: job.fileName! })
+    })
+
     proc.on('close', (code) => {
       job.process = undefined
-      if (code === 0 && fs.existsSync(outputPath)) {
+      const outExists = fs.existsSync(outputPath)
+      log(`ffmpeg exit code: ${code}, output exists: ${outExists}`)
+      if (code !== 0) {
+        log(`STDERR: ${stderrBuf.slice(-500)}`)
+      }
+      if (code === 0 && outExists) {
         try { fs.unlinkSync(inputPath) } catch {}
         job.filePath = outputPath
         job.fileName = path.basename(outputPath)
@@ -358,9 +393,7 @@ function convertToVertical(job: DownloadJob): void {
         job.percent = 100
         notify(job, { type: 'done', fileName: job.fileName })
       } else {
-        console.error('[ffmpeg] failed (code ' + code + '):', stderrBuf.slice(-1000))
-        try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch {}
-        // Serve original as fallback
+        try { if (outExists) fs.unlinkSync(outputPath) } catch {}
         job.status = 'done'
         job.percent = 100
         notify(job, { type: 'done', fileName: job.fileName! })

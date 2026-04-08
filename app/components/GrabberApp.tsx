@@ -86,6 +86,8 @@ export default function GrabberApp() {
   const [saveProgress, setSaveProgress] = useState<Record<string, number>>({})
   const fileCache = useRef<Record<string, File>>({})
   const [fileReady, setFileReady] = useState<Record<string, boolean>>({})
+  const [debugLogs, setDebugLogs] = useState<string[]>([])
+  const [showDebug, setShowDebug] = useState(false)
 
   useEffect(() => {
     // Check if browser supports sharing files (not just text/URLs)
@@ -229,6 +231,10 @@ export default function GrabberApp() {
           }
           if (msg.type === 'converting') {
             return { ...d, status: 'converting' as any, percent: msg.percent, speed: 'Converting to 9:16...', eta: '', totalSize: '' }
+          }
+          if (msg.type === 'log') {
+            setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] ${msg.message}`])
+            return d
           }
           if (msg.type === 'done') {
             if (typeof navigator !== 'undefined' && 'share' in navigator) {
@@ -724,9 +730,22 @@ export default function GrabberApp() {
         )}
       </main>
 
+      {/* Debug panel */}
+      {showDebug && debugLogs.length > 0 && (
+        <div className="border-t border-[#1a1a1a] bg-[#0a0a0a] px-4 py-2 max-h-48 overflow-y-auto">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] text-neutral-500 uppercase font-mono">Debug Log</span>
+            <button onClick={() => setDebugLogs([])} className="text-[10px] text-neutral-600 hover:text-neutral-400">Clear</button>
+          </div>
+          <pre className="text-[10px] text-green-400 font-mono whitespace-pre-wrap break-all">
+            {debugLogs.join('\n')}
+          </pre>
+        </div>
+      )}
+
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        Build 19
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 20</span>
       </footer>
     </div>
   )
