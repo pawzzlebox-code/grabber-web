@@ -331,11 +331,25 @@ function convertToVertical(job: DownloadJob): void {
       return
     }
 
-    const targetH = Math.ceil((w * 16 / 9) / 2) * 2
-    const yOffset = Math.floor((targetH - h) / 2)
-    const vf = `pad=${w}:${targetH}:0:${yOffset}:black`
+    // Scale down if wider than 720 to save memory, then pad to 9:16
+    let outW = w
+    let outH = h
+    if (w > 720) {
+      outW = 720
+      outH = Math.ceil((h * 720 / w) / 2) * 2  // scale height proportionally, keep even
+    }
+    const padH = Math.ceil((outW * 16 / 9) / 2) * 2
+    const yOffset = Math.floor((padH - outH) / 2)
 
-    log(`Padding: ${w}x${h} -> ${w}x${targetH}, yOffset=${yOffset}, filter="${vf}"`)
+    // Build filter: scale (if needed) + pad
+    let vf: string
+    if (outW !== w) {
+      vf = `scale=${outW}:${outH},pad=${outW}:${padH}:0:${yOffset}:black`
+    } else {
+      vf = `pad=${outW}:${padH}:0:${yOffset}:black`
+    }
+
+    log(`Converting: ${w}x${h} -> ${outW}x${padH}, yOffset=${yOffset}, filter="${vf}"`)
     log(`Output: ${outputPath}`)
 
     const ffmpegArgs = [
