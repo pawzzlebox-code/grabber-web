@@ -281,10 +281,9 @@ function extractError(stderr: string, code: number | null): string {
 
 function convertToVertical(job: DownloadJob): void {
   const inputPath = job.filePath!
-  const ext = path.extname(inputPath)
-  const outputPath = inputPath.replace(ext, `_vertical.mp4`)
+  const outputPath = inputPath.replace(/\.[^.]+$/, '_vertical.mp4')
 
-  // First check if video is already 9:16 or taller using ffprobe
+  // Get video dimensions with ffprobe
   const probe = spawn('ffprobe', [
     '-v', 'error', '-select_streams', 'v:0',
     '-show_entries', 'stream=width,height',
@@ -297,26 +296,39 @@ function convertToVertical(job: DownloadJob): void {
     const w = parseInt(wStr) || 0
     const h = parseInt(hStr) || 0
 
-    // Skip if already 9:16 or taller (aspect ratio <= 0.5625)
-    if (w > 0 && h > 0 && w / h <= 9 / 16 + 0.01) {
+    if (w === 0 || h === 0) {
+      // Can't detect dimensions — serve original
+      console.error('[ffmpeg] ffprobe failed, serving original')
       job.status = 'done'
       job.percent = 100
       notify(job, { type: 'done', fileName: job.fileName! })
       return
     }
 
-    // Run ffmpeg — pad to 9:16 without scaling
-    const ffmpegArgs = [
+    // Skip if already 9:16 or taller
+    if (w / h <= 9 / 16 + 0.01) {
+      job.status = 'done'
+      job.percent = 100
+      notify(job, { type: 'done', fileName: job.fileName! })
+      return
+    }
+
+    // Calculate exact padded height (9:16 ratio, must be even)
+    const targetH = Math.ceil((w * 16 / 9) / 2) * 2
+    const yOffset = Math.floor((targetH - h) / 2)
+
+    console.log(`[ffmpeg] Padding ${w}x${h} -> ${w}x${targetH} (y offset: ${yOffset})`)
+
+    const proc = spawn('ffmpeg', [
       '-i', inputPath,
-      '-vf', 'pad=iw:ceil(iw*16/9/2)*2:0:(oh-ih)/2:black',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-threads', '0',
+      '-vf', `pad=${w}:${targetH}:0:${yOffset}:black`,
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
       '-c:a', 'copy',
+      '-movflags', '+faststart',
       '-y',
       '-progress', 'pipe:1',
       outputPath,
-    ]
-
-    const proc = spawn('ffmpeg', ffmpegArgs)
+    ])
     job.process = proc
     job.status = 'converting'
     job.percent = 0
@@ -346,10 +358,9 @@ function convertToVertical(job: DownloadJob): void {
         job.percent = 100
         notify(job, { type: 'done', fileName: job.fileName })
       } else {
-        // Conversion failed — serve original as fallback but log error
-        console.error('[ffmpeg] conversion failed (code ' + code + '):', stderrBuf.slice(-1000))
-        // Clean up failed output
+        console.error('[ffmpeg] failed (code ' + code + '):', stderrBuf.slice(-1000))
         try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch {}
+        // Serve original as fallback
         job.status = 'done'
         job.percent = 100
         notify(job, { type: 'done', fileName: job.fileName! })
