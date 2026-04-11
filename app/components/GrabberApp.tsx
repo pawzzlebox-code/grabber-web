@@ -309,16 +309,48 @@ export default function GrabberApp() {
   // Called from user tap — must be synchronous (no awaits before navigator.share)
   const handleSaveToPhotos = async (id: string, fileName: string) => {
     const cached = fileCache.current[id]
-    if (cached) {
-      try {
-        await navigator.share({ files: [cached] })
-      } catch (err: any) {
-        if (err?.name === 'AbortError') return
-      }
+    if (!cached) {
+      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Save: no cached file, re-fetching`])
+      prefetchFile(id, fileName)
       return
     }
-    // Not cached yet — fall back to fetching (won't open share sheet due to gesture expiry, but try anyway)
-    prefetchFile(id, fileName)
+
+    // Rebuild file with a safe filename (strip emojis/special chars that break navigator.share)
+    const safeName = (cached.name || 'video.mp4').replace(/[^\w.\-]/g, '_').replace(/_+/g, '_')
+    const safeFile = new File([cached], safeName, { type: 'video/mp4' })
+
+    setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Save: ${safeName} (${Math.round(safeFile.size / 1024)}KB)`])
+
+    if (navigator.canShare && !navigator.canShare({ files: [safeFile] })) {
+      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] canShare() returned false`])
+      return
+    }
+
+    try {
+      await navigator.share({ files: [safeFile] })
+      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Share sheet opened`])
+    } catch (err: any) {
+      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Share error: ${err?.name} - ${err?.message}`])
+      if (err?.name === 'AbortError') return
+    }
+  }
+
+  // Direct download from cached file — uses blob URL so it works on mobile too
+  const handleDirectDownload = (id: string, fileName: string) => {
+    const cached = fileCache.current[id]
+    if (cached) {
+      const safeName = (cached.name || fileName || 'video.mp4').replace(/[^\w.\-]/g, '_').replace(/_+/g, '_')
+      const blobUrl = URL.createObjectURL(cached)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download = safeName
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+      return
+    }
+    triggerFileDownload(id, fileName)
   }
 
   // Desktop fallback — normal browser download
@@ -681,12 +713,20 @@ export default function GrabberApp() {
                             </div>
                           </div>
                         ) : canShare && fileReady[dl.id] ? (
-                          <button
-                            onClick={() => handleSaveToPhotos(dl.id, dl.fileName || 'download')}
-                            className="w-full py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
-                          >
-                            Save to Photos
-                          </button>
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() => handleSaveToPhotos(dl.id, dl.fileName || 'download')}
+                              className="flex-1 py-2 bg-green-500 hover:bg-green-600 rounded-lg text-xs font-medium text-white transition-colors"
+                            >
+                              Save to Photos
+                            </button>
+                            <button
+                              onClick={() => handleDirectDownload(dl.id, dl.fileName || 'download')}
+                              className="flex-1 py-2 bg-[#262626] hover:bg-[#333] rounded-lg text-xs font-medium text-neutral-300 transition-colors"
+                            >
+                              Download
+                            </button>
+                          </div>
                         ) : canShare && !fileReady[dl.id] ? (
                           <button
                             onClick={() => prefetchFile(dl.id, dl.fileName || 'download')}
@@ -745,7 +785,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 20</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 21</span>
       </footer>
     </div>
   )
