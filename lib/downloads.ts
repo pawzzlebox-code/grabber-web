@@ -195,7 +195,6 @@ export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInf
     ]
     // Only use --no-playlist for non-Twitter URLs
     if (!twitter) args.unshift('--no-playlist')
-    if (twitter) args.push('--extractor-args', 'twitter:api=syndication')
     args.push(url)
 
     const proc = spawn('yt-dlp', args, {
@@ -450,11 +449,8 @@ export function startDownload(id: string, url: string, formatId?: string, title?
 
   if (!twitter) {
     baseArgs.push('--no-playlist')
-  } else {
-    baseArgs.push('--extractor-args', 'twitter:api=syndication')
-    if (playlistIndex !== undefined) {
-      baseArgs.push('--playlist-items', String(playlistIndex))
-    }
+  } else if (playlistIndex !== undefined) {
+    baseArgs.push('--playlist-items', String(playlistIndex))
   }
 
   const defaultFmt = twitter ? 'b' : 'bestvideo*+bestaudio/best'
