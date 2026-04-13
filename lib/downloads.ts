@@ -116,6 +116,16 @@ export function getDownload(id: string): DownloadJob | undefined {
   return downloads.get(id)
 }
 
+export function deleteDownload(id: string) {
+  const job = downloads.get(id)
+  if (!job) return
+  if (job.filePath && fs.existsSync(job.filePath)) {
+    try { fs.unlinkSync(job.filePath) } catch {}
+  }
+  downloads.delete(id)
+  console.log(`[cleanup] Deleted job ${id}`)
+}
+
 export function getAllDownloads(): DownloadJob[] {
   return Array.from(downloads.values()).map(({ process, listeners, ...rest }) => rest as any)
 }

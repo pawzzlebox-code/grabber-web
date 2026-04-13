@@ -32,7 +32,7 @@ interface DownloadJob {
 }
 
 // Persist settings in localStorage
-const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false }
+const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false, directDownload: false }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -187,6 +187,30 @@ export default function GrabberApp() {
   }, [])
 
   const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string) => {
+    // Direct download mode: browser fetches from source URL
+    if (settings.directDownload) {
+      try {
+        const r = await fetch('/api/geturl', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: video.url, formatId }),
+        })
+        const data = await r.json()
+        if (!r.ok) throw new Error(data.error || 'Failed')
+        const a = document.createElement('a')
+        a.href = data.url
+        a.download = `${video.title}.mp4`.replace(/[^\w.\-]/g, '_')
+        a.target = '_blank'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        return
+      } catch (err: any) {
+        setError(err.message || 'Direct download failed')
+        return
+      }
+    }
+
     try {
       const res = await fetch('/api/download', {
         method: 'POST',
@@ -481,6 +505,22 @@ export default function GrabberApp() {
                 className="sr-only peer"
               />
               <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-purple-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+            </label>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-white">Direct download</p>
+              <p className="text-[11px] text-neutral-500">Faster, skips server. Won't work for geo-blocked sites</p>
+            </div>
+            <label className="relative inline-flex cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.directDownload}
+                onChange={(e) => setSettings(s => ({ ...s, directDownload: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-orange-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
@@ -788,7 +828,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 22</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 23</span>
       </footer>
     </div>
   )

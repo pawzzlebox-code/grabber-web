@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { getDownload } from '@/lib/downloads'
+import { getDownload, deleteDownload } from '@/lib/downloads'
 import fs from 'fs'
 import path from 'path'
 
@@ -33,15 +33,25 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   const mime = inline ? getMimeType(job.filePath) : 'application/octet-stream'
   const disposition = inline ? 'inline' : `attachment; filename="${encodeURIComponent(fileName)}"`
 
-  const stream = fs.createReadStream(job.filePath)
+  const filePath = job.filePath
+  const jobId = params.id
+  const stream = fs.createReadStream(filePath)
+  let streamComplete = false
   const webStream = new ReadableStream({
     start(controller) {
       stream.on('data', (chunk) => controller.enqueue(chunk))
-      stream.on('end', () => controller.close())
+      stream.on('end', () => {
+        streamComplete = true
+        controller.close()
+        // Delete file from server after successful transfer
+        setTimeout(() => deleteDownload(jobId), 2000)
+      })
       stream.on('error', (err) => controller.error(err))
     },
     cancel() {
       stream.destroy()
+      // If client cancels mid-stream, don't delete (they might retry)
+      if (streamComplete) setTimeout(() => deleteDownload(jobId), 2000)
     }
   })
 
