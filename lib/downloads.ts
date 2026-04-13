@@ -468,8 +468,9 @@ export function startDownload(id: string, url: string, formatId?: string, title?
 
     job.process = proc
     job.percent = 0
-    job.speed = ''
+    job.speed = 'Initializing...'
     job.eta = ''
+    notify(job, { type: 'status', message: 'Initializing...' })
     let lastLine = ''
     let stderrOutput = ''
 
@@ -480,13 +481,34 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         if (!trimmed) continue
         lastLine = trimmed
 
-        const match = trimmed.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/)
-        if (match) {
-          job.percent = parseFloat(match[1])
-          job.totalSize = match[2]
-          job.speed = match[3]
-          job.eta = match[4]
+        const progressMatch = trimmed.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/)
+        if (progressMatch) {
+          job.percent = parseFloat(progressMatch[1])
+          job.totalSize = progressMatch[2]
+          job.speed = progressMatch[3]
+          job.eta = progressMatch[4]
           notify(job, { type: 'progress', percent: job.percent, totalSize: job.totalSize, speed: job.speed, eta: job.eta })
+          continue
+        }
+
+        // Status messages from yt-dlp — shown before download starts
+        let statusMsg = ''
+        if (/\[info\].*Downloading webpage/i.test(trimmed)) statusMsg = 'Fetching webpage...'
+        else if (/\[info\].*Downloading player/i.test(trimmed)) statusMsg = 'Loading player...'
+        else if (/\[info\].*Downloading.*API/i.test(trimmed)) statusMsg = 'Querying API...'
+        else if (/\[info\].*Downloading.*manifest/i.test(trimmed)) statusMsg = 'Loading manifest...'
+        else if (/\[info\].*Downloading.*m3u8/i.test(trimmed)) statusMsg = 'Loading HLS stream...'
+        else if (/\[info\].*Downloading.*JSON/i.test(trimmed)) statusMsg = 'Fetching metadata...'
+        else if (/\[hlsnative\]/i.test(trimmed)) statusMsg = 'Preparing HLS download...'
+        else if (/\[download\].*Destination/i.test(trimmed)) statusMsg = 'Starting download...'
+        else if (/\[download\].*has already been downloaded/i.test(trimmed)) statusMsg = 'Finalizing...'
+        else if (/\[Merger\]/i.test(trimmed)) statusMsg = 'Merging video + audio...'
+        else if (/\[ExtractAudio\]/i.test(trimmed)) statusMsg = 'Extracting audio...'
+        else if (/\[FixupM3u8\]/i.test(trimmed)) statusMsg = 'Fixing stream...'
+
+        if (statusMsg) {
+          job.speed = statusMsg
+          notify(job, { type: 'status', message: statusMsg })
         }
       }
     })

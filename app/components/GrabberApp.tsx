@@ -229,6 +229,9 @@ export default function GrabberApp() {
           if (msg.type === 'retry') {
             return { ...d, percent: 0, speed: `Retrying (${msg.attempt}/${msg.maxRetries})...`, eta: '', totalSize: '' }
           }
+          if (msg.type === 'status') {
+            return { ...d, speed: msg.message, eta: '', totalSize: '' }
+          }
           if (msg.type === 'converting') {
             return { ...d, status: 'converting' as any, percent: msg.percent, speed: 'Converting to 9:16...', eta: '', totalSize: '' }
           }
@@ -785,7 +788,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 21</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 22</span>
       </footer>
     </div>
   )
