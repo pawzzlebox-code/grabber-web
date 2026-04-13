@@ -356,6 +356,8 @@ function convertToVertical(job: DownloadJob): void {
       '-i', inputPath,
       '-vf', vf,
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+      '-pix_fmt', 'yuv420p',
+      '-profile:v', 'main', '-level', '4.0',
       '-c:a', 'copy',
       '-movflags', '+faststart',
       '-y',
