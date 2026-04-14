@@ -350,12 +350,13 @@ function convertToVertical(job: DownloadJob): void {
     const padH = Math.ceil((outW * 16 / 9) / 2) * 2
     const yOffset = Math.floor((padH - outH) / 2)
 
-    // Build filter: scale (if needed) + pad
+    // Build filter: scale (if needed) + pad + force square pixels (setsar=1)
+    // setsar=1 is critical — prevents Instagram showing grey due to non-square SAR
     let vf: string
     if (outW !== w) {
-      vf = `scale=${outW}:${outH},pad=${outW}:${padH}:0:${yOffset}:black`
+      vf = `scale=${outW}:${outH},pad=${outW}:${padH}:0:${yOffset}:black,setsar=1`
     } else {
-      vf = `pad=${outW}:${padH}:0:${yOffset}:black`
+      vf = `pad=${outW}:${padH}:0:${yOffset}:black,setsar=1`
     }
 
     log(`Converting: ${w}x${h} -> ${outW}x${padH}, yOffset=${yOffset}, filter="${vf}"`)
@@ -364,7 +365,9 @@ function convertToVertical(job: DownloadJob): void {
     const ffmpegArgs = [
       '-i', inputPath,
       '-vf', vf,
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+      // veryfast preset (not ultrafast — ultrafast forces Constrained Baseline profile
+      // which Instagram can't decode properly, showing grey)
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
       '-pix_fmt', 'yuv420p',
       '-profile:v', 'main', '-level', '4.0',
       '-c:a', 'copy',
