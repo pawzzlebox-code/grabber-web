@@ -288,7 +288,7 @@ function extractError(stderr: string, code: number | null): string {
   return errorLine.trim() || `Download failed (exit code ${code})`
 }
 
-function convertToVertical(job: DownloadJob): void {
+function convertToVertical(job: DownloadJob, onComplete: () => void): void {
   const inputPath = job.filePath!
   const outputPath = inputPath.replace(/\.[^.]+$/, '_vertical.mp4')
 
@@ -311,9 +311,7 @@ function convertToVertical(job: DownloadJob): void {
   probe.stderr.on('data', (d: Buffer) => { probeErr += d.toString() })
   probe.on('error', (err) => {
     log(`ffprobe spawn error: ${err.message}`)
-    job.status = 'done'
-    job.percent = 100
-    notify(job, { type: 'done', fileName: job.fileName! })
+    onComplete()
   })
   probe.on('close', (probeCode) => {
     log(`ffprobe exit code: ${probeCode}, stdout: "${probeOut.trim()}", stderr: "${probeErr.trim()}"`)
@@ -324,9 +322,7 @@ function convertToVertical(job: DownloadJob): void {
 
     if (w === 0 || h === 0) {
       log(`Cannot detect dimensions (w=${w}, h=${h}), serving original`)
-      job.status = 'done'
-      job.percent = 100
-      notify(job, { type: 'done', fileName: job.fileName! })
+      onComplete()
       return
     }
 
@@ -334,9 +330,7 @@ function convertToVertical(job: DownloadJob): void {
 
     if (w / h <= 9 / 16 + 0.01) {
       log(`Already vertical (ratio ${(w/h).toFixed(3)} <= 0.5725), skipping`)
-      job.status = 'done'
-      job.percent = 100
-      notify(job, { type: 'done', fileName: job.fileName! })
+      onComplete()
       return
     }
 
@@ -401,9 +395,7 @@ function convertToVertical(job: DownloadJob): void {
     proc.on('error', (err) => {
       log(`ffmpeg spawn error: ${err.message}`)
       job.process = undefined
-      job.status = 'done'
-      job.percent = 100
-      notify(job, { type: 'done', fileName: job.fileName! })
+      onComplete()
     })
 
     proc.on('close', (code) => {
@@ -417,20 +409,182 @@ function convertToVertical(job: DownloadJob): void {
         try { fs.unlinkSync(inputPath) } catch {}
         job.filePath = outputPath
         job.fileName = path.basename(outputPath)
-        job.status = 'done'
-        job.percent = 100
-        notify(job, { type: 'done', fileName: job.fileName })
+        onComplete()
       } else {
         try { if (outExists) fs.unlinkSync(outputPath) } catch {}
-        job.status = 'done'
-        job.percent = 100
-        notify(job, { type: 'done', fileName: job.fileName! })
+        onComplete()
       }
     })
   })
 }
 
-export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number, verticalPad?: boolean, duration?: number): DownloadJob {
+async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promise<void> {
+  const inputPath = job.filePath!
+  const audioPath = path.join(TEMP_DIR, `${job.id}_audio.mp3`)
+  const srtPath = path.join(TEMP_DIR, `${job.id}_subs.srt`)
+  const outputPath = inputPath.replace(/\.[^.]+$/, '_subbed.mp4')
+
+  function log(msg: string) {
+    console.log('[subs]', msg)
+    notify(job, { type: 'log', message: msg })
+  }
+
+  function cleanup() {
+    try { if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath) } catch {}
+    try { if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath) } catch {}
+  }
+
+  const GROQ_API_KEY = process.env.GROQ_API_KEY
+  if (!GROQ_API_KEY) {
+    log('GROQ_API_KEY not set — skipping subtitle burn')
+    onComplete()
+    return
+  }
+
+  try {
+    // Step 1: Extract audio as MP3
+    notify(job, { type: 'status', message: 'Extracting audio...' })
+    log(`Extracting audio to ${audioPath}`)
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn('ffmpeg', [
+        '-i', inputPath,
+        '-vn',
+        '-ar', '16000',
+        '-ac', '1',
+        '-b:a', '64k',
+        '-y', audioPath,
+      ])
+      let err = ''
+      proc.stderr.on('data', (d: Buffer) => { err += d.toString() })
+      proc.on('error', (e) => reject(new Error(`ffmpeg spawn: ${e.message}`)))
+      proc.on('close', (code) => {
+        if (code === 0 && fs.existsSync(audioPath)) resolve()
+        else reject(new Error(`ffmpeg exit ${code}: ${err.slice(-300)}`))
+      })
+    })
+
+    const audioSize = fs.statSync(audioPath).size
+    log(`Audio extracted: ${(audioSize / 1024 / 1024).toFixed(2)} MB`)
+
+    if (audioSize > 20 * 1024 * 1024) {
+      log('Audio exceeds 20 MB — too large for Groq free tier, skipping')
+      cleanup()
+      onComplete()
+      return
+    }
+
+    // Step 2: Upload to Groq translations endpoint
+    notify(job, { type: 'status', message: 'Transcribing with Whisper...' })
+    log('Calling Groq /audio/translations...')
+
+    const audioBuffer = fs.readFileSync(audioPath)
+    const formData = new FormData()
+    formData.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'audio.mp3')
+    formData.append('model', 'whisper-large-v3')
+    formData.append('response_format', 'srt')
+
+    const t0 = Date.now()
+    const res = await fetch('https://api.groq.com/openai/v1/audio/translations', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
+      body: formData,
+    })
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      log(`Groq error ${res.status}: ${errBody.slice(0, 300)}`)
+      cleanup()
+      onComplete()
+      return
+    }
+
+    const srtText = await res.text()
+    log(`Groq responded in ${Date.now() - t0}ms (${srtText.length} chars)`)
+
+    if (!srtText.trim()) {
+      log('Empty SRT from Groq — skipping burn')
+      cleanup()
+      onComplete()
+      return
+    }
+
+    fs.writeFileSync(srtPath, srtText, 'utf-8')
+
+    // Step 3: Burn subtitles into video
+    notify(job, { type: 'status', message: 'Burning subtitles...' })
+    log(`Burning subtitles to ${outputPath}`)
+
+    // Escape the path for the subtitles filter (ffmpeg needs special escaping)
+    // On Linux, forward slashes work fine; need to escape colons in Windows paths
+    const escapedSrt = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+    const vf = `subtitles=${escapedSrt}:force_style='Fontname=Arial,Fontsize=24,Bold=1,PrimaryColour=&Hffffff&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=50'`
+
+    const ffmpegArgs = [
+      '-i', inputPath,
+      '-vf', vf,
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+      '-pix_fmt', 'yuv420p',
+      '-profile:v', 'main', '-level', '4.0',
+      '-c:a', 'copy',
+      '-movflags', '+faststart',
+      '-y',
+      '-progress', 'pipe:1',
+      outputPath,
+    ]
+    log(`Command: ffmpeg ${ffmpegArgs.join(' ')}`)
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn('ffmpeg', ffmpegArgs)
+      job.process = proc
+      job.status = 'converting'
+      job.percent = 0
+      notify(job, { type: 'converting', percent: 0 })
+
+      proc.stdout.on('data', (data: Buffer) => {
+        const text = data.toString()
+        const timeMatch = text.match(/out_time_ms=(\d+)/)
+        if (timeMatch && job.duration && job.duration > 0) {
+          const currentSec = parseInt(timeMatch[1]) / 1000000
+          const pct = Math.min(99, Math.round((currentSec / job.duration) * 100))
+          job.percent = pct
+          notify(job, { type: 'converting', percent: pct })
+        }
+      })
+
+      let stderrBuf = ''
+      proc.stderr.on('data', (d: Buffer) => { stderrBuf += d.toString() })
+
+      proc.on('error', (e) => reject(new Error(`ffmpeg spawn: ${e.message}`)))
+      proc.on('close', (code) => {
+        job.process = undefined
+        const outExists = fs.existsSync(outputPath)
+        log(`ffmpeg exit ${code}, output exists: ${outExists}`)
+        if (code === 0 && outExists) {
+          resolve()
+        } else {
+          log(`STDERR: ${stderrBuf.slice(-500)}`)
+          try { if (outExists) fs.unlinkSync(outputPath) } catch {}
+          reject(new Error(`ffmpeg burn failed (code ${code})`))
+        }
+      })
+    })
+
+    // Success: replace input with burned output
+    try { fs.unlinkSync(inputPath) } catch {}
+    job.filePath = outputPath
+    job.fileName = path.basename(outputPath)
+    log(`Success: ${outputPath}`)
+  } catch (err: any) {
+    log(`Error: ${err?.message || err}`)
+    // Keep original file — fall through to onComplete
+  } finally {
+    cleanup()
+    onComplete()
+  }
+}
+
+export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number, verticalPad?: boolean, duration?: number, burnSubtitles?: boolean): DownloadJob {
   const job: DownloadJob = {
     id, url,
     title: title || 'Downloading...',
@@ -533,13 +687,27 @@ export function startDownload(id: string, url: string, formatId?: string, title?
       if (code === 0 && lastLine && !lastLine.startsWith('[')) {
         job.filePath = lastLine.trim()
         job.fileName = path.basename(job.filePath)
-        // If vertical pad requested and not audio-only, convert
-        if (verticalPad && formatId !== 'ba') {
-          convertToVertical(job)
-        } else {
+
+        const isVideo = formatId !== 'ba'
+
+        const runDone = () => {
           job.status = 'done'
           job.percent = 100
-          notify(job, { type: 'done', fileName: job.fileName })
+          notify(job, { type: 'done', fileName: job.fileName! })
+        }
+
+        const runBurn = () => {
+          if (burnSubtitles && isVideo) {
+            burnSubtitlesFn(job, runDone)
+          } else {
+            runDone()
+          }
+        }
+
+        if (verticalPad && isVideo) {
+          convertToVertical(job, runBurn)
+        } else {
+          runBurn()
         }
       } else if (attempt < MAX_RETRIES && isRetryable(stderrOutput)) {
         // Retry after delay
