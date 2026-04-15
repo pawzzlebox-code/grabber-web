@@ -288,13 +288,46 @@ function extractError(stderr: string, code: number | null): string {
   return errorLine.trim() || `Download failed (exit code ${code})`
 }
 
-function convertToVertical(job: DownloadJob, onComplete: () => void): void {
+// ffmpeg mutex — only one ffmpeg job runs at a time to avoid OOM on small droplet
+const ffmpegQueue: Array<() => void> = []
+let ffmpegRunning = false
+
+function acquireFfmpegSlot(): Promise<void> {
+  return new Promise((resolve) => {
+    const start = () => {
+      ffmpegRunning = true
+      resolve()
+    }
+    if (!ffmpegRunning) start()
+    else ffmpegQueue.push(start)
+  })
+}
+
+function releaseFfmpegSlot(): void {
+  ffmpegRunning = false
+  const next = ffmpegQueue.shift()
+  if (next) next()
+}
+
+async function convertToVertical(job: DownloadJob, onComplete: () => void): Promise<void> {
   const inputPath = job.filePath!
   const outputPath = inputPath.replace(/\.[^.]+$/, '_vertical.mp4')
 
   function log(msg: string) {
     console.log('[ffmpeg]', msg)
     notify(job, { type: 'log', message: msg })
+  }
+
+  // Wait for ffmpeg slot so only one heavy operation runs at a time
+  log('Waiting for ffmpeg slot...')
+  await acquireFfmpegSlot()
+  log('Got ffmpeg slot')
+
+  // Wrap onComplete to release the slot
+  const originalOnComplete = onComplete
+  const finish = () => {
+    releaseFfmpegSlot()
+    originalOnComplete()
   }
 
   log(`Input: ${inputPath}`)
@@ -311,7 +344,7 @@ function convertToVertical(job: DownloadJob, onComplete: () => void): void {
   probe.stderr.on('data', (d: Buffer) => { probeErr += d.toString() })
   probe.on('error', (err) => {
     log(`ffprobe spawn error: ${err.message}`)
-    onComplete()
+    finish()
   })
   probe.on('close', (probeCode) => {
     log(`ffprobe exit code: ${probeCode}, stdout: "${probeOut.trim()}", stderr: "${probeErr.trim()}"`)
@@ -322,7 +355,7 @@ function convertToVertical(job: DownloadJob, onComplete: () => void): void {
 
     if (w === 0 || h === 0) {
       log(`Cannot detect dimensions (w=${w}, h=${h}), serving original`)
-      onComplete()
+      finish()
       return
     }
 
@@ -330,7 +363,7 @@ function convertToVertical(job: DownloadJob, onComplete: () => void): void {
 
     if (w / h <= 9 / 16 + 0.01) {
       log(`Already vertical (ratio ${(w/h).toFixed(3)} <= 0.5725), skipping`)
-      onComplete()
+      finish()
       return
     }
 
@@ -395,7 +428,7 @@ function convertToVertical(job: DownloadJob, onComplete: () => void): void {
     proc.on('error', (err) => {
       log(`ffmpeg spawn error: ${err.message}`)
       job.process = undefined
-      onComplete()
+      finish()
     })
 
     proc.on('close', (code) => {
@@ -409,10 +442,10 @@ function convertToVertical(job: DownloadJob, onComplete: () => void): void {
         try { fs.unlinkSync(inputPath) } catch {}
         job.filePath = outputPath
         job.fileName = path.basename(outputPath)
-        onComplete()
+        finish()
       } else {
         try { if (outExists) fs.unlinkSync(outputPath) } catch {}
-        onComplete()
+        finish()
       }
     })
   })
@@ -455,6 +488,17 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     return
   }
 
+  // Serialize ffmpeg operations across all concurrent jobs
+  log('Waiting for ffmpeg slot...')
+  await acquireFfmpegSlot()
+  log('Got ffmpeg slot')
+
+  const originalOnComplete = onComplete
+  const finish = () => {
+    releaseFfmpegSlot()
+    originalOnComplete()
+  }
+
   try {
     // Step 1: Extract audio as MP3
     job.status = 'subtitling' as any
@@ -485,7 +529,7 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     if (audioSize > 20 * 1024 * 1024) {
       log('Audio exceeds 20 MB — too large for Groq free tier, skipping')
       cleanup()
-      onComplete()
+      finish()
       return
     }
 
@@ -511,7 +555,7 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
       const errBody = await res.text().catch(() => '')
       log(`Groq error ${res.status}: ${errBody.slice(0, 300)}`)
       cleanup()
-      onComplete()
+      finish()
       return
     }
 
@@ -522,7 +566,7 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     if (!segments.length) {
       log('No segments returned from Groq — skipping burn')
       cleanup()
-      onComplete()
+      finish()
       return
     }
 
@@ -597,10 +641,10 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     log(`Success: ${outputPath}`)
   } catch (err: any) {
     log(`Error: ${err?.message || err}`)
-    // Keep original file — fall through to onComplete
+    // Keep original file — fall through to finish()
   } finally {
     cleanup()
-    onComplete()
+    finish()
   }
 }
 
