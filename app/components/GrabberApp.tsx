@@ -241,55 +241,72 @@ export default function GrabberApp() {
 
       setDownloads(prev => [job, ...prev])
 
-      // Connect to SSE for progress
-      const evtSource = new EventSource(`/api/progress/${data.id}`)
-      evtSource.onmessage = (event) => {
+      // Poll for progress (SSE doesn't work through Cloudflare free tunnel)
+      console.log('[poll] Starting polling for', data.id)
+      let logsSince = 0
+      let stopped = false
+      let donePrefetched = false
+      const poll = async () => {
+        if (stopped) return
         try {
-        const msg = JSON.parse(event.data)
-        setDownloads(prev => prev.map(d => {
-          if (d.id !== data.id) return d
-          if (msg.type === 'progress') {
-            return { ...d, percent: msg.percent, speed: msg.speed, eta: msg.eta, totalSize: msg.totalSize }
+          const r = await fetch(`/api/progress/${data.id}?logsSince=${logsSince}`, { cache: 'no-store' })
+          if (!r.ok) {
+            console.error('[poll] HTTP', r.status)
+            return
           }
-          if (msg.type === 'retry') {
-            return { ...d, percent: 0, speed: `Retrying (${msg.attempt}/${msg.maxRetries})...`, eta: '', totalSize: '' }
+          const state = await r.json()
+          console.log('[poll]', state.status, state.percent + '%', state.speed)
+
+          // Append new logs to debug panel
+          if (state.logs && state.logs.length) {
+            setDebugLogs(prev => [...prev.slice(-80), ...state.logs])
+            logsSince = state.logsTotal
           }
-          if (msg.type === 'status') {
-            return { ...d, speed: msg.message, eta: '', totalSize: '' }
-          }
-          if (msg.type === 'converting') {
-            return { ...d, status: 'converting' as any, percent: msg.percent, speed: msg.message || 'Converting to 9:16...', eta: '', totalSize: '' }
-          }
-          if (msg.type === 'subtitling') {
-            return { ...d, status: 'subtitling' as any, percent: msg.percent || 0, speed: msg.message || 'Processing subtitles...', eta: '', totalSize: '' }
-          }
-          if (msg.type === 'log') {
-            setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] ${msg.message}`])
-            return d
-          }
-          if (msg.type === 'done') {
-            if (typeof navigator !== 'undefined' && 'share' in navigator) {
-              // Mobile: pre-fetch file into cache so "Save to Photos" tap is instant
-              prefetchFile(data.id, msg.fileName)
-            } else {
-              // Desktop: auto-download via <a> tag
-              triggerFileDownload(data.id, msg.fileName)
+
+          setDownloads(prev => prev.map(d => {
+            if (d.id !== data.id) return d
+            const next = {
+              ...d,
+              status: state.status,
+              percent: state.percent,
+              speed: state.speed || '',
+              eta: state.eta || '',
+              totalSize: state.totalSize || '',
+              fileName: state.fileName || d.fileName,
+              error: state.error || d.error,
             }
-            return { ...d, status: 'done', percent: 100, fileName: msg.fileName }
+            return next
+          }))
+
+          if (state.status === 'done' && !donePrefetched) {
+            donePrefetched = true
+            if (typeof navigator !== 'undefined' && 'share' in navigator) {
+              prefetchFile(data.id, state.fileName)
+            } else {
+              triggerFileDownload(data.id, state.fileName)
+            }
           }
-          if (msg.type === 'error') {
-            return { ...d, status: 'error', error: msg.message }
+
+          if (state.status === 'done' || state.status === 'error') {
+            stopped = true
+            console.log('[poll] Terminal state reached, stopping')
+            return
           }
-          return d
-        }))
-        if (msg.type === 'done' || msg.type === 'error') {
-          evtSource.close()
+        } catch (err) {
+          console.error('[poll] Error', err)
         }
-        } catch { /* ignore malformed SSE messages */ }
       }
-      evtSource.onerror = () => {
-        evtSource.close()
-      }
+
+      // Poll every 500ms
+      const interval = setInterval(() => {
+        if (stopped) {
+          clearInterval(interval)
+          return
+        }
+        poll()
+      }, 500)
+      // Immediate first poll
+      poll()
     } catch (err: any) {
       setError(err.message || 'Failed to start download')
     }
@@ -851,7 +868,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 25</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 26</span>
       </footer>
     </div>
   )

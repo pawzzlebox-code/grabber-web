@@ -18,7 +18,7 @@ export interface DownloadJob {
   url: string
   title: string
   thumbnail: string
-  status: 'pending' | 'downloading' | 'converting' | 'done' | 'error'
+  status: 'pending' | 'downloading' | 'converting' | 'subtitling' | 'done' | 'error'
   percent: number
   speed: string
   eta: string
@@ -30,6 +30,7 @@ export interface DownloadJob {
   createdAt: number
   process?: ChildProcess
   duration?: number
+  logs: string[]
 }
 
 const downloads = new Map<string, DownloadJob>()
@@ -131,6 +132,11 @@ export function getAllDownloads(): DownloadJob[] {
 }
 
 function notify(job: DownloadJob, data: any) {
+  // Persist log messages to job state so polling clients can retrieve them
+  if (data.type === 'log' && data.message) {
+    job.logs.push(`[${new Date().toLocaleTimeString()}] ${data.message}`)
+    if (job.logs.length > 100) job.logs.shift()
+  }
   for (const listener of job.listeners) {
     try { listener(data) } catch {}
   }
@@ -658,6 +664,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     listeners: new Set(),
     createdAt: Date.now(),
     duration: duration || 0,
+    logs: [],
   }
   downloads.set(id, job)
 
