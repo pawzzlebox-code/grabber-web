@@ -443,7 +443,8 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
 
   try {
     // Step 1: Extract audio as MP3
-    notify(job, { type: 'status', message: 'Extracting audio...' })
+    job.status = 'subtitling' as any
+    notify(job, { type: 'subtitling', percent: 5, message: 'Extracting audio...' })
     log(`Extracting audio to ${audioPath}`)
 
     await new Promise<void>((resolve, reject) => {
@@ -475,7 +476,7 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     }
 
     // Step 2: Upload to Groq translations endpoint
-    notify(job, { type: 'status', message: 'Transcribing with Whisper...' })
+    notify(job, { type: 'subtitling', percent: 25, message: 'Transcribing with Whisper...' })
     log('Calling Groq /audio/translations...')
 
     const audioBuffer = fs.readFileSync(audioPath)
@@ -512,7 +513,7 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     fs.writeFileSync(srtPath, srtText, 'utf-8')
 
     // Step 3: Burn subtitles into video
-    notify(job, { type: 'status', message: 'Burning subtitles...' })
+    notify(job, { type: 'subtitling', percent: 50, message: 'Burning subtitles...' })
     log(`Burning subtitles to ${outputPath}`)
 
     // Escape the path for the subtitles filter (ffmpeg needs special escaping)
@@ -537,18 +538,19 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     await new Promise<void>((resolve, reject) => {
       const proc = spawn('ffmpeg', ffmpegArgs)
       job.process = proc
-      job.status = 'converting'
-      job.percent = 0
-      notify(job, { type: 'converting', percent: 0 })
+      job.status = 'subtitling' as any
+      job.percent = 50
+      notify(job, { type: 'subtitling', percent: 50, message: 'Burning subtitles...' })
 
       proc.stdout.on('data', (data: Buffer) => {
         const text = data.toString()
         const timeMatch = text.match(/out_time_ms=(\d+)/)
         if (timeMatch && job.duration && job.duration > 0) {
           const currentSec = parseInt(timeMatch[1]) / 1000000
-          const pct = Math.min(99, Math.round((currentSec / job.duration) * 100))
+          // ffmpeg progress maps to 50-99% of subtitle stage (50% was for prep work)
+          const pct = 50 + Math.min(49, Math.round((currentSec / job.duration) * 49))
           job.percent = pct
-          notify(job, { type: 'converting', percent: pct })
+          notify(job, { type: 'subtitling', percent: pct, message: 'Burning subtitles...' })
         }
       })
 

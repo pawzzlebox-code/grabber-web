@@ -20,7 +20,7 @@ interface DownloadJob {
   id: string
   title: string
   thumbnail: string
-  status: 'downloading' | 'converting' | 'done' | 'error'
+  status: 'downloading' | 'converting' | 'subtitling' | 'done' | 'error'
   percent: number
   speed: string
   eta: string
@@ -258,7 +258,10 @@ export default function GrabberApp() {
             return { ...d, speed: msg.message, eta: '', totalSize: '' }
           }
           if (msg.type === 'converting') {
-            return { ...d, status: 'converting' as any, percent: msg.percent, speed: 'Converting to 9:16...', eta: '', totalSize: '' }
+            return { ...d, status: 'converting' as any, percent: msg.percent, speed: msg.message || 'Converting to 9:16...', eta: '', totalSize: '' }
+          }
+          if (msg.type === 'subtitling') {
+            return { ...d, status: 'subtitling' as any, percent: msg.percent || 0, speed: msg.message || 'Processing subtitles...', eta: '', totalSize: '' }
           }
           if (msg.type === 'log') {
             setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] ${msg.message}`])
@@ -715,13 +718,16 @@ export default function GrabberApp() {
                         {dl.status === 'converting' && (
                           <Loader size={12} className="animate-spin text-purple-500" />
                         )}
+                        {dl.status === 'subtitling' && (
+                          <Loader size={12} className="animate-spin text-yellow-500" />
+                        )}
                         {dl.status === 'done' && (
                           <CheckCircle size={12} className="text-green-500" />
                         )}
                         {dl.status === 'error' && (
                           <AlertCircle size={12} className="text-red-500" />
                         )}
-                        {dl.status !== 'downloading' && dl.status !== 'converting' && (
+                        {dl.status !== 'downloading' && dl.status !== 'converting' && dl.status !== 'subtitling' && (
                           <button
                             onClick={() => removeDownload(dl.id)}
                             className="p-0.5 text-neutral-600 hover:text-neutral-300 transition-colors"
@@ -734,11 +740,11 @@ export default function GrabberApp() {
 
                     <p className="text-[10px] text-neutral-500">{dl.formatLabel}</p>
 
-                    {(dl.status === 'downloading' || dl.status === 'converting') && (
+                    {(dl.status === 'downloading' || dl.status === 'converting' || dl.status === 'subtitling') && (
                       <>
                         <div className="mt-1.5 w-full bg-[#262626] rounded-full h-1">
                           <div
-                            className={`h-1 rounded-full transition-all duration-300 ${dl.status === 'converting' ? 'bg-purple-500' : 'bg-sky-500'}`}
+                            className={`h-1 rounded-full transition-all duration-300 ${dl.status === 'converting' ? 'bg-purple-500' : dl.status === 'subtitling' ? 'bg-yellow-500' : 'bg-sky-500'}`}
                             style={{ width: `${dl.percent}%` }}
                           />
                         </div>
@@ -845,7 +851,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 24</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 25</span>
       </footer>
     </div>
   )
