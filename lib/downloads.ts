@@ -418,6 +418,20 @@ function convertToVertical(job: DownloadJob, onComplete: () => void): void {
   })
 }
 
+// Convert Groq verbose_json segments to SRT format
+function segmentsToSrt(segments: Array<{ start: number; end: number; text: string }>): string {
+  const fmt = (sec: number): string => {
+    const ms = Math.floor((sec % 1) * 1000)
+    const s = Math.floor(sec) % 60
+    const m = Math.floor(sec / 60) % 60
+    const h = Math.floor(sec / 3600)
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`
+  }
+  return segments.map((seg, i) =>
+    `${i + 1}\n${fmt(seg.start)} --> ${fmt(seg.end)}\n${seg.text.trim()}\n`
+  ).join('\n')
+}
+
 async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promise<void> {
   const inputPath = job.filePath!
   const audioPath = path.join(TEMP_DIR, `${job.id}_audio.mp3`)
@@ -483,7 +497,8 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
     const formData = new FormData()
     formData.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'audio.mp3')
     formData.append('model', 'whisper-large-v3')
-    formData.append('response_format', 'srt')
+    // Groq translations endpoint only supports json/text/verbose_json (not srt)
+    formData.append('response_format', 'verbose_json')
 
     const t0 = Date.now()
     const res = await fetch('https://api.groq.com/openai/v1/audio/translations', {
@@ -500,17 +515,20 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
       return
     }
 
-    const srtText = await res.text()
-    log(`Groq responded in ${Date.now() - t0}ms (${srtText.length} chars)`)
+    const json = await res.json() as { segments?: Array<{ start: number; end: number; text: string }>, text?: string }
+    const segments = json.segments || []
+    log(`Groq responded in ${Date.now() - t0}ms (${segments.length} segments)`)
 
-    if (!srtText.trim()) {
-      log('Empty SRT from Groq — skipping burn')
+    if (!segments.length) {
+      log('No segments returned from Groq — skipping burn')
       cleanup()
       onComplete()
       return
     }
 
+    const srtText = segmentsToSrt(segments)
     fs.writeFileSync(srtPath, srtText, 'utf-8')
+    log(`Wrote ${srtText.length} chars of SRT to ${srtPath}`)
 
     // Step 3: Burn subtitles into video
     notify(job, { type: 'subtitling', percent: 50, message: 'Burning subtitles...' })
