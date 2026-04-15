@@ -12,7 +12,11 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
     start(controller) {
-      // Send current state immediately
+      // Send a 2KB padding comment first — defeats Cloudflare's buffering threshold
+      // Many proxies buffer the first ~1KB of a streamed response before flushing
+      const padding = ':' + ' '.repeat(2048) + '\n\n'
+      controller.enqueue(encoder.encode(padding))
+
       const sendEvent = (data: any) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
       }
@@ -34,15 +38,26 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
         return
       }
 
+      // Keepalive ping every 2 seconds — forces stream flush through proxies
+      const keepalive = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(':ping\n\n'))
+        } catch {
+          clearInterval(keepalive)
+        }
+      }, 2000)
+
       // Listen for updates
       const listener = (data: any) => {
         try {
           sendEvent(data)
           if (data.type === 'done' || data.type === 'error') {
+            clearInterval(keepalive)
             job.listeners.delete(listener)
             controller.close()
           }
         } catch {
+          clearInterval(keepalive)
           job.listeners.delete(listener)
         }
       }
@@ -51,6 +66,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
       // Cleanup on abort
       req.signal.addEventListener('abort', () => {
+        clearInterval(keepalive)
         job.listeners.delete(listener)
       })
     }
@@ -58,9 +74,11 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
   return new Response(stream, {
     headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
       'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no', // nginx
+      'Content-Encoding': 'identity', // disable gzip buffering
     },
   })
 }
