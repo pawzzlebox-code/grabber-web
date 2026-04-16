@@ -17,10 +17,27 @@ type OutgoingMessage =
   | { type: 'progress'; pct: number; stage: string }
   | { type: 'done'; blob: Blob }
   | { type: 'error'; message: string }
+  | { type: 'log'; message: string }
 
 function post(msg: OutgoingMessage) {
   ;(self as unknown as DedicatedWorkerGlobalScope).postMessage(msg)
 }
+
+// Forward worker-side console logs to the main thread so they show up in the
+// on-screen debug panel on iPhones (no Mac / Web Inspector required).
+function stringify(args: any[]): string {
+  return args.map(a => {
+    if (typeof a === 'string') return a
+    if (a instanceof Error) return a.message
+    try { return JSON.stringify(a) } catch { return String(a) }
+  }).join(' ')
+}
+const origLog = console.log.bind(console)
+const origWarn = console.warn.bind(console)
+const origError = console.error.bind(console)
+console.log = (...args: any[]) => { origLog(...args); post({ type: 'log', message: stringify(args) }) }
+console.warn = (...args: any[]) => { origWarn(...args); post({ type: 'log', message: 'WARN ' + stringify(args) }) }
+console.error = (...args: any[]) => { origError(...args); post({ type: 'log', message: 'ERROR ' + stringify(args) }) }
 
 async function runWithFallback(
   videoBlob: Blob,

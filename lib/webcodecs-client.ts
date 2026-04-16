@@ -7,6 +7,7 @@ type WorkerIncoming =
   | { type: 'progress'; pct: number; stage: string }
   | { type: 'done'; blob: Blob }
   | { type: 'error'; message: string }
+  | { type: 'log'; message: string }
 
 export interface WorkerHandle {
   promise: Promise<Blob>
@@ -17,6 +18,7 @@ export function runWorker(
   videoBlob: Blob,
   options: Omit<ProcessOptions, 'onProgress'>,
   onProgress: (pct: number, stage: string) => void,
+  onLog?: (message: string) => void,
 ): WorkerHandle {
   const worker = new Worker(new URL('./webcodecs-worker.ts', import.meta.url), {
     type: 'module',
@@ -35,6 +37,9 @@ export function runWorker(
       switch (msg.type) {
         case 'progress':
           try { onProgress(msg.pct, msg.stage) } catch {}
+          return
+        case 'log':
+          try { onLog?.(msg.message) } catch {}
           return
         case 'done':
           cleanup()

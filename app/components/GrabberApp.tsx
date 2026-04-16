@@ -427,6 +427,10 @@ export default function GrabberApp() {
         (pct, stage) => {
           setInstantProgress(prev => ({ ...prev, [id]: { pct, stage } }))
         },
+        (msg) => {
+          // Worker console.log / warn / error forwarded to our on-screen debug panel
+          setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] [worker] ${msg}`])
+        },
       )
       // Register worker in cancel handles so the cancel button can terminate it
       const existingHandle = cancelHandles.current[id] || { stop: () => {} }
@@ -1052,7 +1056,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 29</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 30</span>
       </footer>
     </div>
   )
