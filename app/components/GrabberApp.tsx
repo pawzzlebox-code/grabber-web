@@ -92,6 +92,12 @@ export default function GrabberApp() {
   const [showDebug, setShowDebug] = useState(false)
   const [webCodecsSupported, setWebCodecsSupported] = useState(false)
   const [instantProgress, setInstantProgress] = useState<Record<string, { pct: number; stage: string }>>({})
+  // Tracks in-flight download IDs that can be cancelled. Holds AbortControllers + worker handles.
+  const cancelHandles = useRef<Record<string, {
+    stop: () => void
+    abort?: AbortController
+    worker?: { cancel: () => void }
+  }>>({})
 
   useEffect(() => {
     isWebCodecsSupported().then(setWebCodecsSupported).catch(() => setWebCodecsSupported(false))
@@ -255,6 +261,11 @@ export default function GrabberApp() {
       let logsSince = 0
       let stopped = false
       let donePrefetched = false
+
+      // Register a cancel handle for this job — lets handleCancelDownload stop us
+      cancelHandles.current[data.id] = {
+        stop: () => { stopped = true },
+      }
       const poll = async () => {
         if (stopped) return
         try {
@@ -372,10 +383,16 @@ export default function GrabberApp() {
   const prefetchAndProcess = async (id: string, fileName: string, srt: string, padTo9x16: boolean) => {
     const fileUrl = `/api/file/${id}`
     const name = fileName || 'video.mp4'
+
+    // Register abort controller for the fetch (cancel button can trigger this)
+    const ac = new AbortController()
+    const existing = cancelHandles.current[id] || { stop: () => {} }
+    cancelHandles.current[id] = { ...existing, abort: ac }
+
     try {
       // Step 1: fetch raw video from server with progress (same as prefetchFile)
       setSaveProgress(prev => ({ ...prev, [id]: 0 }))
-      const res = await fetch(fileUrl)
+      const res = await fetch(fileUrl, { signal: ac.signal })
       const contentLength = res.headers.get('content-length')
       const total = contentLength ? parseInt(contentLength, 10) : 0
       let rawBlob: Blob
@@ -404,13 +421,17 @@ export default function GrabberApp() {
       setInstantProgress(prev => ({ ...prev, [id]: { pct: 0, stage: 'Starting device encoder...' } }))
       setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode: starting WebCodecs worker (${(rawBlob.size / 1024 / 1024).toFixed(1)} MB)`])
 
-      const processed = await runWorker(
+      const handle = runWorker(
         rawBlob,
         { padTo9x16, burnSubtitles: true, srt },
         (pct, stage) => {
           setInstantProgress(prev => ({ ...prev, [id]: { pct, stage } }))
         },
       )
+      // Register worker in cancel handles so the cancel button can terminate it
+      const existingHandle = cancelHandles.current[id] || { stop: () => {} }
+      cancelHandles.current[id] = { ...existingHandle, worker: handle }
+      const processed = await handle.promise
 
       setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode done: ${(processed.size / 1024 / 1024).toFixed(1)} MB`])
 
@@ -419,7 +440,13 @@ export default function GrabberApp() {
       fileCache.current[id] = new File([processed], outName, { type: 'video/mp4' })
       setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
       setFileReady(prev => ({ ...prev, [id]: true }))
+      delete cancelHandles.current[id]
     } catch (err: any) {
+      // If cancelled, the fetch / worker was aborted intentionally — don't fall through
+      if (err?.name === 'AbortError' || /cancel/i.test(err?.message || '')) {
+        setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Cancelled by user`])
+        return
+      }
       console.error('[instant] failed:', err)
       setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode error: ${err?.message || err}`])
       // Clear instant progress, keep saveProgress clear too
@@ -533,6 +560,42 @@ export default function GrabberApp() {
 
   const removeDownload = (id: string) => {
     setDownloads(prev => prev.filter(d => d.id !== id))
+  }
+
+  const handleCancelDownload = async (id: string) => {
+    setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Cancelling ${id}`])
+
+    // 1. Stop local polling, abort fetches, terminate worker
+    const handle = cancelHandles.current[id]
+    if (handle) {
+      try { handle.stop() } catch {}
+      try { handle.abort?.abort() } catch {}
+      try { handle.worker?.cancel() } catch {}
+      delete cancelHandles.current[id]
+    }
+
+    // 2. Tell server to kill child processes and delete the file
+    try {
+      await fetch(`/api/cancel/${id}`, { method: 'POST', cache: 'no-store' })
+    } catch (err) {
+      console.error('[cancel] server request failed', err)
+    }
+
+    // 3. Clear any per-id progress state
+    setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+    setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+    setFileReady(prev => { const n = { ...prev }; delete n[id]; return n })
+    delete fileCache.current[id]
+
+    // 4. Update the download card — mark cancelled
+    setDownloads(prev => prev.map(d => d.id === id ? {
+      ...d,
+      status: 'error' as any,
+      error: 'Cancelled',
+      speed: '',
+      eta: '',
+      totalSize: '',
+    } : d))
   }
 
   return (
@@ -838,10 +901,24 @@ export default function GrabberApp() {
                         {dl.status === 'error' && (
                           <AlertCircle size={12} className="text-red-500" />
                         )}
-                        {dl.status !== 'downloading' && dl.status !== 'converting' && dl.status !== 'subtitling' && (
+                        {/* Cancel button: while anything active (server download or client-side processing) */}
+                        {(dl.status === 'downloading' || dl.status === 'converting' || dl.status === 'subtitling' ||
+                          saveProgress[dl.id] !== undefined || instantProgress[dl.id]) && (
+                          <button
+                            onClick={() => handleCancelDownload(dl.id)}
+                            className="p-0.5 text-red-500 hover:text-red-400 transition-colors"
+                            title="Cancel + delete file"
+                          >
+                            <X size={12} />
+                          </button>
+                        )}
+                        {/* Remove button: once terminal, no active work */}
+                        {dl.status !== 'downloading' && dl.status !== 'converting' && dl.status !== 'subtitling' &&
+                          saveProgress[dl.id] === undefined && !instantProgress[dl.id] && (
                           <button
                             onClick={() => removeDownload(dl.id)}
                             className="p-0.5 text-neutral-600 hover:text-neutral-300 transition-colors"
+                            title="Remove"
                           >
                             <X size={12} />
                           </button>
@@ -975,7 +1052,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 27</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 28</span>
       </footer>
     </div>
   )

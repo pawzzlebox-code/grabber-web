@@ -8,22 +8,29 @@ type WorkerIncoming =
   | { type: 'done'; blob: Blob }
   | { type: 'error'; message: string }
 
+export interface WorkerHandle {
+  promise: Promise<Blob>
+  cancel: () => void
+}
+
 export function runWorker(
   videoBlob: Blob,
   options: Omit<ProcessOptions, 'onProgress'>,
   onProgress: (pct: number, stage: string) => void,
-): Promise<Blob> {
-  return new Promise<Blob>((resolve, reject) => {
-    // Next.js / Webpack 5 bundles this worker via the URL-constructor pattern
-    const worker = new Worker(new URL('./webcodecs-worker.ts', import.meta.url), {
-      type: 'module',
-    })
+): WorkerHandle {
+  const worker = new Worker(new URL('./webcodecs-worker.ts', import.meta.url), {
+    type: 'module',
+  })
 
+  let cancelled = false
+
+  const promise = new Promise<Blob>((resolve, reject) => {
     const cleanup = () => {
       try { worker.terminate() } catch {}
     }
 
     worker.onmessage = (event: MessageEvent<WorkerIncoming>) => {
+      if (cancelled) return
       const msg = event.data
       switch (msg.type) {
         case 'progress':
@@ -41,15 +48,23 @@ export function runWorker(
     }
 
     worker.onerror = (err) => {
+      if (cancelled) return
       cleanup()
       reject(new Error(err.message || 'Worker error'))
     }
 
-    // Kick off the job
     worker.postMessage({
       type: 'process',
       videoBlob,
       options,
     })
   })
+
+  return {
+    promise,
+    cancel: () => {
+      cancelled = true
+      try { worker.terminate() } catch {}
+    },
+  }
 }

@@ -934,10 +934,26 @@ export function startDownloadWithCookies(id: string, url: string, cookiesTxt?: s
 
 export function cancelDownload(id: string) {
   const job = downloads.get(id)
-  if (job?.process) {
-    job.process.kill()
-    job.status = 'error'
-    job.error = 'Cancelled'
-    notify(job, { type: 'error', message: 'Cancelled' })
+  if (!job) return
+
+  // 1. Kill any active child process (yt-dlp, ffmpeg, etc.)
+  if (job.process) {
+    try { job.process.kill('SIGKILL') } catch {}
+    job.process = undefined
   }
+
+  // 2. Delete the output video file if it exists
+  if (job.filePath && fs.existsSync(job.filePath)) {
+    try { fs.unlinkSync(job.filePath) } catch {}
+  }
+
+  // 3. Mark cancelled + notify listeners (so polling clients get the signal)
+  job.status = 'error'
+  job.error = 'Cancelled'
+  job.srt = undefined
+  notify(job, { type: 'error', message: 'Cancelled' })
+
+  // 4. Remove from the downloads Map so /api/file/:id returns 404 for it
+  downloads.delete(id)
+  console.log(`[cancel] Killed job ${id} + deleted file`)
 }
