@@ -71,13 +71,24 @@ function drawSubtitleOnCanvas(
   text: string,
   cw: number,
   ch: number,
+  videoBottomY: number, // Y coordinate where the actual video frame ends (bottom edge of letterbox content)
 ) {
   const lines = wrapText(text, 30)
   // Font size scales with canvas height for readability on any resolution
   const fontSize = Math.max(22, Math.min(36, Math.round(ch * 0.028)))
   const lineHeight = Math.round(fontSize * 1.25)
-  const bottomMargin = Math.round(ch * 0.06)
   const outlineWidth = Math.max(4, Math.round(fontSize * 0.22))
+
+  // Gap between the bottom of the video content and the top of the first subtitle line (~40px on a 1280-tall canvas)
+  const gapBelowVideo = Math.round(ch * 0.03)
+
+  // Position the FIRST line's baseline just below the video, then stack additional lines downward.
+  // But never let subtitles run off the bottom of the canvas — clamp within a bottom safety margin.
+  const minBottomMargin = Math.round(ch * 0.02)
+  const blockHeight = lines.length * lineHeight
+  let firstLineBaseline = videoBottomY + gapBelowVideo + lineHeight
+  const maxBaseline = ch - minBottomMargin - (blockHeight - lineHeight)
+  if (firstLineBaseline > maxBaseline) firstLineBaseline = maxBaseline
 
   ctx.save()
   ctx.font = `bold ${fontSize}px Arial, sans-serif`
@@ -87,9 +98,9 @@ function drawSubtitleOnCanvas(
   ctx.miterLimit = 2
 
   const cx = cw / 2
-  // Stack lines upward from bottom
+  // Draw lines top-down starting just below the video
   for (let i = 0; i < lines.length; i++) {
-    const y = ch - bottomMargin - (lines.length - 1 - i) * lineHeight
+    const y = firstLineBaseline + i * lineHeight
     // Thick black outline first
     ctx.lineWidth = outlineWidth
     ctx.strokeStyle = '#000000'
@@ -223,7 +234,9 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
         const ts = sample.microsecondTimestamp
         const active = findActiveSubtitle(subs, ts)
         if (active) {
-          drawSubtitleOnCanvas(ctx, active.text, outW, outH)
+          // Pass the Y coord where the video content ends so subtitles sit
+          // just below it (not at the bottom of the whole canvas / black bar)
+          drawSubtitleOnCanvas(ctx, active.text, outW, outH, drawY + drawH)
         }
       }
 
