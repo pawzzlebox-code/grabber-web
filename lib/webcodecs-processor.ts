@@ -250,9 +250,30 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
   if (aTrack && audioSource) {
     options.onProgress(95, 'Copying audio...')
     try {
+      // First audio packet MUST include decoderConfig meta so the muxer can
+      // properly set up the AAC track header. Without this, the audio track
+      // is malformed and the resulting MP4 is broken (tiny / won't play).
+      const decoderConfig = await aTrack.getDecoderConfig()
+      if (!decoderConfig) {
+        throw new Error('Could not read audio decoder config from input track')
+      }
+
       const aSink = new EncodedPacketSink(aTrack)
+      let first = true
+      let audioPacketCount = 0
       for await (const packet of aSink.packets()) {
-        await audioSource.add(packet)
+        if (first) {
+          await audioSource.add(packet, { decoderConfig })
+          first = false
+        } else {
+          await audioSource.add(packet)
+        }
+        audioPacketCount++
+        // Emit progress every 50 packets so user sees something during audio copy
+        if (audioPacketCount % 50 === 0) {
+          options.onProgress(Math.min(98, 95 + Math.floor(audioPacketCount / 100)), 'Copying audio...')
+          await new Promise(r => setTimeout(r, 0))
+        }
       }
     } finally {
       audioSource.close()
@@ -260,13 +281,20 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
   }
 
   // ---------- Finalize ----------
-  options.onProgress(98, 'Finalizing...')
+  options.onProgress(99, 'Finalizing...')
   await output.finalize()
   input.dispose()
 
   const buffer = (output.target as BufferTarget).buffer
   if (!buffer) {
     throw new Error('Output finalized but no buffer produced')
+  }
+
+  // Sanity check: a valid MP4 with video+audio should be many KB at minimum.
+  // If we got back < 1 KB, something went wrong in the pipeline (usually the
+  // audio/video track setup) and we'd rather fail loudly than save garbage.
+  if (buffer.byteLength < 1024) {
+    throw new Error(`Output too small (${buffer.byteLength} bytes) — mux failed, likely audio track config issue`)
   }
 
   options.onProgress(100, 'Done')
