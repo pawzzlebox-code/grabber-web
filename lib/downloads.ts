@@ -31,6 +31,7 @@ export interface DownloadJob {
   process?: ChildProcess
   duration?: number
   logs: string[]
+  srt?: string
 }
 
 const downloads = new Map<string, DownloadJob>()
@@ -654,7 +655,121 @@ async function burnSubtitlesFn(job: DownloadJob, onComplete: () => void): Promis
   }
 }
 
-export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number, verticalPad?: boolean, duration?: number, burnSubtitles?: boolean): DownloadJob {
+// Fast path for instant mode: extract audio, call Groq, store SRT on job.
+// No video re-encoding — the browser will do that via WebCodecs.
+async function generateSubtitlesOnly(job: DownloadJob, onComplete: () => void): Promise<void> {
+  const inputPath = job.filePath!
+  const audioPath = path.join(TEMP_DIR, `${job.id}_audio.mp3`)
+
+  function log(msg: string) {
+    console.log('[srt-only]', msg)
+    notify(job, { type: 'log', message: msg })
+  }
+
+  function cleanup() {
+    try { if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath) } catch {}
+  }
+
+  const GROQ_API_KEY = process.env.GROQ_API_KEY
+  if (!GROQ_API_KEY) {
+    log('GROQ_API_KEY not set — skipping SRT generation')
+    onComplete()
+    return
+  }
+
+  // Reuse the same ffmpeg slot mutex so we don't stack jobs
+  log('Waiting for ffmpeg slot...')
+  await acquireFfmpegSlot()
+  log('Got ffmpeg slot')
+
+  const finish = () => {
+    releaseFfmpegSlot()
+    onComplete()
+  }
+
+  try {
+    // Step 1: Extract audio as small MP3 (fast, not a full re-encode)
+    job.status = 'subtitling' as any
+    job.speed = 'Extracting audio...'
+    notify(job, { type: 'subtitling', percent: 20, message: 'Extracting audio...' })
+    log(`Extracting audio to ${audioPath}`)
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn('ffmpeg', [
+        '-i', inputPath,
+        '-vn',
+        '-ar', '16000',
+        '-ac', '1',
+        '-b:a', '64k',
+        '-y', audioPath,
+      ])
+      let err = ''
+      proc.stderr.on('data', (d: Buffer) => { err += d.toString() })
+      proc.on('error', (e) => reject(new Error(`ffmpeg spawn: ${e.message}`)))
+      proc.on('close', (code) => {
+        if (code === 0 && fs.existsSync(audioPath)) resolve()
+        else reject(new Error(`ffmpeg exit ${code}: ${err.slice(-300)}`))
+      })
+    })
+
+    const audioSize = fs.statSync(audioPath).size
+    log(`Audio extracted: ${(audioSize / 1024 / 1024).toFixed(2)} MB`)
+
+    if (audioSize > 20 * 1024 * 1024) {
+      log('Audio exceeds 20 MB — skipping Groq, instant mode will have no subs')
+      cleanup()
+      finish()
+      return
+    }
+
+    // Step 2: Groq translation -> SRT
+    job.speed = 'Transcribing with Whisper...'
+    notify(job, { type: 'subtitling', percent: 60, message: 'Transcribing with Whisper...' })
+    log('Calling Groq /audio/translations...')
+
+    const audioBuffer = fs.readFileSync(audioPath)
+    const formData = new FormData()
+    formData.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'audio.mp3')
+    formData.append('model', 'whisper-large-v3')
+    formData.append('response_format', 'verbose_json')
+
+    const t0 = Date.now()
+    const res = await fetch('https://api.groq.com/openai/v1/audio/translations', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
+      body: formData,
+    })
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '')
+      log(`Groq error ${res.status}: ${errBody.slice(0, 300)}`)
+      cleanup()
+      finish()
+      return
+    }
+
+    const json = await res.json() as { segments?: Array<{ start: number; end: number; text: string }> }
+    const segments = json.segments || []
+    log(`Groq responded in ${Date.now() - t0}ms (${segments.length} segments)`)
+
+    if (!segments.length) {
+      log('No segments returned — instant mode will have no subs')
+      cleanup()
+      finish()
+      return
+    }
+
+    job.srt = segmentsToSrt(segments)
+    log(`Stored ${job.srt.length} chars of SRT on job`)
+  } catch (err: any) {
+    log(`Error: ${err?.message || err}`)
+  } finally {
+    cleanup()
+    finish()
+  }
+}
+
+export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number, verticalPad?: boolean, duration?: number, burnSubtitles?: boolean, instantMode?: boolean): DownloadJob {
   const job: DownloadJob = {
     id, url,
     title: title || 'Downloading...',
@@ -765,6 +880,17 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           job.status = 'done'
           job.percent = 100
           notify(job, { type: 'done', fileName: job.fileName! })
+        }
+
+        // Instant mode: generate SRT only, skip all server-side video encoding.
+        // The browser will do the padding + subtitle burn with WebCodecs.
+        if (instantMode && isVideo) {
+          if (burnSubtitles) {
+            generateSubtitlesOnly(job, runDone)
+          } else {
+            runDone()
+          }
+          return
         }
 
         const runBurn = () => {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { saveCookies } from '@/lib/downloads'
+import { saveCookies, getCookieStatus } from '@/lib/downloads'
 
 const COOKIE_SECRET = process.env.COOKIE_SECRET || ''
 
@@ -11,6 +11,16 @@ const corsHeaders = {
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: corsHeaders })
+}
+
+export async function GET(req: NextRequest) {
+  if (COOKIE_SECRET) {
+    const key = req.nextUrl.searchParams.get('key')
+    if (key !== COOKIE_SECRET) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+  }
+  return NextResponse.json(getCookieStatus())
 }
 
 export async function POST(req: NextRequest) {

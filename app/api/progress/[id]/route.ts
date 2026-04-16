@@ -27,6 +27,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     error: job.error,
     logs: newLogs,
     logsTotal: job.logs.length,
+    srt: job.srt,
   }, {
     headers: { 'Cache-Control': 'no-store' },
   })

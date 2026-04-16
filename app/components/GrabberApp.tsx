@@ -5,6 +5,8 @@ import {
   ClipboardPaste, Download, Loader, CheckCircle, AlertCircle,
   X, Zap, Settings, ChevronDown, Trash2, RefreshCw
 } from 'lucide-react'
+import { isWebCodecsSupported } from '@/lib/webcodecs-processor'
+import { runWorker } from '@/lib/webcodecs-client'
 
 interface VideoInfo {
   id: string
@@ -32,7 +34,7 @@ interface DownloadJob {
 }
 
 // Persist settings in localStorage
-const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false, directDownload: false, burnSubtitles: false }
+const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false, directDownload: false, burnSubtitles: false, instantMode: false }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -88,6 +90,12 @@ export default function GrabberApp() {
   const [fileReady, setFileReady] = useState<Record<string, boolean>>({})
   const [debugLogs, setDebugLogs] = useState<string[]>([])
   const [showDebug, setShowDebug] = useState(false)
+  const [webCodecsSupported, setWebCodecsSupported] = useState(false)
+  const [instantProgress, setInstantProgress] = useState<Record<string, { pct: number; stage: string }>>({})
+
+  useEffect(() => {
+    isWebCodecsSupported().then(setWebCodecsSupported).catch(() => setWebCodecsSupported(false))
+  }, [])
 
   useEffect(() => {
     // Check if browser supports sharing files (not just text/URLs)
@@ -224,6 +232,7 @@ export default function GrabberApp() {
           verticalPad: settings.verticalPad,
           duration: video.duration,
           burnSubtitles: settings.burnSubtitles,
+          instantMode: settings.instantMode && webCodecsSupported,
         }),
       })
       const data = await res.json()
@@ -280,7 +289,11 @@ export default function GrabberApp() {
 
           if (state.status === 'done' && !donePrefetched) {
             donePrefetched = true
-            if (typeof navigator !== 'undefined' && 'share' in navigator) {
+            const useInstant = settings.instantMode && webCodecsSupported && settings.burnSubtitles
+            if (useInstant && state.srt) {
+              // Instant mode: fetch raw video, process on-device with WebCodecs
+              prefetchAndProcess(data.id, state.fileName, state.srt, settings.verticalPad)
+            } else if (typeof navigator !== 'undefined' && 'share' in navigator) {
               prefetchFile(data.id, state.fileName)
             } else {
               triggerFileDownload(data.id, state.fileName)
@@ -351,6 +364,69 @@ export default function GrabberApp() {
     } catch {
       // Prefetch failed — clear progress, user can tap to retry
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+    }
+  }
+
+  // Instant mode: fetch raw video from server, then process locally via WebCodecs worker.
+  // Shows green "Preparing..." during fetch, then cyan "Processing on device..." during encode.
+  const prefetchAndProcess = async (id: string, fileName: string, srt: string, padTo9x16: boolean) => {
+    const fileUrl = `/api/file/${id}`
+    const name = fileName || 'video.mp4'
+    try {
+      // Step 1: fetch raw video from server with progress (same as prefetchFile)
+      setSaveProgress(prev => ({ ...prev, [id]: 0 }))
+      const res = await fetch(fileUrl)
+      const contentLength = res.headers.get('content-length')
+      const total = contentLength ? parseInt(contentLength, 10) : 0
+      let rawBlob: Blob
+      if (total && res.body) {
+        const reader = res.body.getReader()
+        const chunks: Uint8Array[] = []
+        let received = 0
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          chunks.push(value)
+          received += value.length
+          setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
+        }
+        const combined = new Uint8Array(received)
+        let offset = 0
+        for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length }
+        rawBlob = new Blob([combined], { type: 'video/mp4' })
+      } else {
+        setSaveProgress(prev => ({ ...prev, [id]: -1 }))
+        rawBlob = await res.blob()
+      }
+      setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+
+      // Step 2: WebCodecs worker — local pad + burn subs
+      setInstantProgress(prev => ({ ...prev, [id]: { pct: 0, stage: 'Starting device encoder...' } }))
+      setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode: starting WebCodecs worker (${(rawBlob.size / 1024 / 1024).toFixed(1)} MB)`])
+
+      const processed = await runWorker(
+        rawBlob,
+        { padTo9x16, burnSubtitles: true, srt },
+        (pct, stage) => {
+          setInstantProgress(prev => ({ ...prev, [id]: { pct, stage } }))
+        },
+      )
+
+      setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode done: ${(processed.size / 1024 / 1024).toFixed(1)} MB`])
+
+      // Step 3: swap cached file with processed version, enable Save to Photos
+      const outName = name.replace(/\.[^.]+$/, '') + '_processed.mp4'
+      fileCache.current[id] = new File([processed], outName, { type: 'video/mp4' })
+      setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      setFileReady(prev => ({ ...prev, [id]: true }))
+    } catch (err: any) {
+      console.error('[instant] failed:', err)
+      setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode error: ${err?.message || err}`])
+      // Clear instant progress, keep saveProgress clear too
+      setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      // Fall back to plain prefetch so user can at least download the un-processed video
+      prefetchFile(id, fileName)
     }
   }
 
@@ -560,6 +636,24 @@ export default function GrabberApp() {
               <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-yellow-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
+
+          {webCodecsSupported && (
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-white">⚡ Instant mode (WebCodecs)</p>
+                <p className="text-[11px] text-neutral-500">Process on your device's hardware encoder — ~5s on iPhone. Works only with subtitles on.</p>
+              </div>
+              <label className="relative inline-flex cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.instantMode}
+                  onChange={(e) => setSettings(s => ({ ...s, instantMode: e.target.checked }))}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-cyan-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+              </label>
+            </div>
+          )}
 
           <div className="pt-1">
             <p className="text-[10px] text-neutral-600">
@@ -776,7 +870,20 @@ export default function GrabberApp() {
 
                     {dl.status === 'done' && (
                       <div className="mt-1.5">
-                        {saveProgress[dl.id] !== undefined ? (
+                        {instantProgress[dl.id] ? (
+                          <div className="relative w-full h-9 bg-[#262626] rounded-lg overflow-hidden">
+                            <div
+                              className="absolute inset-y-0 left-0 bg-cyan-500 transition-all duration-200"
+                              style={{ width: `${instantProgress[dl.id].pct}%` }}
+                            />
+                            <div className="relative flex items-center justify-center h-full gap-1.5">
+                              <Loader size={12} className="animate-spin text-white" />
+                              <span className="text-xs font-medium text-white">
+                                ⚡ {instantProgress[dl.id].stage} {instantProgress[dl.id].pct}%
+                              </span>
+                            </div>
+                          </div>
+                        ) : saveProgress[dl.id] !== undefined ? (
                           <div className="relative w-full h-9 bg-[#262626] rounded-lg overflow-hidden">
                             {saveProgress[dl.id] >= 0 ? (
                               <div
@@ -868,7 +975,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 26</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 27</span>
       </footer>
     </div>
   )
