@@ -45,9 +45,25 @@ export async function isWebCodecsSupported(): Promise<boolean> {
   }
 }
 
+/** Feature-detect WebGPU with importExternalTexture support (needed for the
+ *  zero-copy GPU compositing path). Safari 26+, Chrome 113+, Edge 113+. */
+export async function isWebGpuSupported(): Promise<boolean> {
+  try {
+    const nav = globalThis.navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } }
+    if (!nav?.gpu) return false
+    const adapter = await nav.gpu.requestAdapter()
+    if (!adapter) return false
+    // Bare minimum: an adapter exists. We'll check device features in the
+    // WebGPU processor's own init path before committing to that pipeline.
+    return true
+  } catch {
+    return false
+  }
+}
+
 // --- Subtitle rendering ---
 
-function wrapText(text: string, maxCharsPerLine: number): string[] {
+export function wrapText(text: string, maxCharsPerLine: number): string[] {
   // Collapse newlines from SRT into spaces, then word-wrap
   const words = text.replace(/\n/g, ' ').split(/\s+/).filter(Boolean)
   const lines: string[] = []
@@ -66,7 +82,7 @@ function wrapText(text: string, maxCharsPerLine: number): string[] {
   return lines
 }
 
-function drawSubtitleOnCanvas(
+export function drawSubtitleOnCanvas(
   ctx: OffscreenCanvasRenderingContext2D,
   text: string,
   cw: number,
@@ -114,7 +130,7 @@ function drawSubtitleOnCanvas(
 
 // --- Letterbox math (scale-fit into 9:16 canvas) ---
 
-interface DrawRect {
+export interface DrawRect {
   outW: number
   outH: number
   drawW: number
@@ -123,7 +139,7 @@ interface DrawRect {
   drawY: number
 }
 
-function computeLetterboxRect(srcW: number, srcH: number, pad: boolean): DrawRect {
+export function computeLetterboxRect(srcW: number, srcH: number, pad: boolean): DrawRect {
   if (!pad) {
     // Keep source dimensions (must be even for H.264)
     const outW = srcW % 2 === 0 ? srcW : srcW - 1
