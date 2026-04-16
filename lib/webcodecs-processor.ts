@@ -46,17 +46,25 @@ export async function isWebCodecsSupported(): Promise<boolean> {
 }
 
 /** Feature-detect WebGPU with importExternalTexture support (needed for the
- *  zero-copy GPU compositing path). Safari 26+, Chrome 113+, Edge 113+. */
+ *  zero-copy GPU compositing path). Safari 26+, Chrome 113+, Edge 113+.
+ *  Logs a specific reason when it returns false so the debug panel shows
+ *  what exactly is missing (helpful for users on iOS without Web Inspector). */
 export async function isWebGpuSupported(): Promise<boolean> {
   try {
-    const nav = globalThis.navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } }
-    if (!nav?.gpu) return false
+    const nav = globalThis.navigator as Navigator & { gpu?: { requestAdapter: (opts?: unknown) => Promise<unknown> } }
+    if (!nav?.gpu) {
+      console.log('[webgpu] navigator.gpu is undefined — browser/OS too old (need iOS 26+ / Safari 26+ / Chrome 113+)')
+      return false
+    }
     const adapter = await nav.gpu.requestAdapter()
-    if (!adapter) return false
-    // Bare minimum: an adapter exists. We'll check device features in the
-    // WebGPU processor's own init path before committing to that pipeline.
+    if (!adapter) {
+      console.log('[webgpu] navigator.gpu present but requestAdapter() returned null — feature flag may be off (Safari → Settings → Feature Flags → WebGPU) or GPU is unsupported')
+      return false
+    }
+    console.log('[webgpu] Adapter acquired — WebGPU available')
     return true
-  } catch {
+  } catch (err: any) {
+    console.log('[webgpu] Detection threw:', err?.message || err)
     return false
   }
 }
