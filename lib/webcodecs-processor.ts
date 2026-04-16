@@ -182,7 +182,9 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
 
   // Canvas + context
   const canvas = new OffscreenCanvas(outW, outH)
-  const ctx = canvas.getContext('2d', { alpha: false })
+  // `alpha: false` + `willReadFrequently: false` keeps the canvas GPU-backed
+  // and avoids a GPU→CPU readback on each frame when copying to VideoFrame
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false })
   if (!ctx) {
     input.dispose()
     throw new Error('Failed to get 2D context for OffscreenCanvas')
@@ -198,8 +200,13 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
     codec: 'avc',
     bitrate: QUALITY_HIGH,
     hardwareAcceleration: 'prefer-hardware',
+    // Real-time latency mode: encoder prioritizes speed over quality, can drop
+    // frames if it gets backed up. Big speedup on iOS VideoToolbox.
+    latencyMode: 'realtime',
   })
-  output.addVideoTrack(canvasSource, { frameRate: 30 })
+  // Don't force frameRate: 30 here — let mediabunny use the source's native rate.
+  // Forcing 30 caused re-sampling overhead for 24/60 fps sources.
+  output.addVideoTrack(canvasSource)
 
   let audioSource: EncodedAudioPacketSource | null = null
   if (aTrack) {
@@ -216,17 +223,33 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
   options.onProgress(5, 'Processing frames...')
   const vSink = new VideoSampleSink(vTrack)
 
-  // Estimate total frames for progress
-  const estimatedTotalFrames = Math.max(1, Math.round(videoDuration * 30))
+  // Use actual source frame rate (not hardcoded 30) so progress is accurate.
+  // computePacketStats scans a prefix of packets for a fast estimate.
+  let sourceFps = 30
+  try {
+    const stats = await vTrack.computePacketStats(50)
+    if (stats.averagePacketRate > 0) sourceFps = stats.averagePacketRate
+  } catch {}
+
+  const estimatedTotalFrames = Math.max(1, Math.round(videoDuration * sourceFps))
   let frameIdx = 0
+
+  // Canvas only needs clearing when padding leaves black bars that could ghost
+  const needsClear = options.padTo9x16 && (drawX > 0 || drawY > 0 || drawW < outW || drawH < outH)
+  if (needsClear) {
+    ctx.fillStyle = '#000000'
+    ctx.fillRect(0, 0, outW, outH)
+  }
+
+  const t0 = performance.now()
+  let tDecode = 0, tDraw = 0, tEncode = 0
 
   try {
     for await (const sample of vSink.samples()) {
-      // Clear canvas to black (for padding and to avoid ghosting)
-      ctx.fillStyle = '#000000'
-      ctx.fillRect(0, 0, outW, outH)
+      const tA = performance.now()
 
-      // Draw source frame at letterbox position
+      // Draw source frame at letterbox position (no need to clear every frame —
+      // the frame itself covers the video area, black bars only change on padding transitions)
       sample.draw(ctx, drawX, drawY, drawW, drawH)
 
       // Subtitle overlay
@@ -234,30 +257,38 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
         const ts = sample.microsecondTimestamp
         const active = findActiveSubtitle(subs, ts)
         if (active) {
-          // Pass the Y coord where the video content ends so subtitles sit
-          // just below it (not at the bottom of the whole canvas / black bar)
           drawSubtitleOnCanvas(ctx, active.text, outW, outH, drawY + drawH)
         }
       }
 
+      const tB = performance.now()
+
       // Encode from canvas (mediabunny handles VideoFrame creation + encoder feeding)
       await canvasSource.add(sample.timestamp, sample.duration)
+
+      const tC = performance.now()
+      tDraw += (tB - tA)
+      tEncode += (tC - tB)
+      tDecode += (tA - (frameIdx === 0 ? t0 : 0))
 
       // Immediately release the decoded frame
       sample.close()
 
       frameIdx++
-      if (frameIdx % 10 === 0) {
-        // Frames 0-95% of the bar; reserve 95-99% for audio + finalize
+      // Progress + yield every 60 frames (was 10 — yielding 28x fewer times)
+      if (frameIdx % 60 === 0) {
         const pct = Math.min(94, Math.round((frameIdx / estimatedTotalFrames) * 94))
-        options.onProgress(pct, 'Processing frames...')
-        // Yield briefly so messages can flow and GC can run
-        await new Promise(r => setTimeout(r, 0))
+        const fps = frameIdx / ((performance.now() - t0) / 1000)
+        options.onProgress(pct, `Processing ${fps.toFixed(0)} fps`)
       }
     }
   } finally {
     canvasSource.close()
   }
+
+  const totalSec = (performance.now() - t0) / 1000
+  const fps = frameIdx / totalSec
+  console.log(`[WebCodecs] Encoded ${frameIdx} frames in ${totalSec.toFixed(1)}s (${fps.toFixed(1)} fps) — draw=${tDraw.toFixed(0)}ms encode=${tEncode.toFixed(0)}ms`)
 
   // ---------- Audio passthrough ----------
   if (aTrack && audioSource) {
