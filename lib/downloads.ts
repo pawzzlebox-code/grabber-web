@@ -882,13 +882,16 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           notify(job, { type: 'done', fileName: job.fileName! })
         }
 
-        // Instant mode: generate SRT only, skip all server-side video encoding.
-        // The browser will do the padding + subtitle burn with WebCodecs.
-        if (instantMode && isVideo) {
-          if (burnSubtitles) {
-            generateSubtitlesOnly(job, runDone)
+        // Instant mode only bypasses server-side encoding when SUBTITLES are
+        // needed — that's where the big time savings come from (Groq + burn).
+        // 9:16 padding still runs on the server (fast ffmpeg single-pass) even
+        // in instant mode, because WebCodecs didn't actually speed it up.
+        if (instantMode && burnSubtitles && isVideo) {
+          if (verticalPad) {
+            // Pad on server, then generate SRT (no subtitle burn on server)
+            convertToVertical(job, () => generateSubtitlesOnly(job, runDone))
           } else {
-            runDone()
+            generateSubtitlesOnly(job, runDone)
           }
           return
         }
