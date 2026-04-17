@@ -303,9 +303,10 @@ export default function GrabberApp() {
             const useInstant = settings.instantMode && webCodecsSupported && settings.burnSubtitles
             if (useInstant && state.srt) {
               // Instant mode: fetch raw video, process on-device with WebCodecs
-              // Server already did 9:16 pad in instant mode, so tell WebCodecs NOT
-              // to pad again — only burn subtitles on the already-padded video.
-              prefetchAndProcess(data.id, state.fileName, state.srt, false)
+              // In instant mode the server does NOT pre-pad (so WebCodecs knows
+              // where video content ends and places subtitles correctly below it).
+              // Pass the user's 9:16 toggle through so WebCodecs does the pad itself.
+              prefetchAndProcess(data.id, state.fileName, state.srt, settings.verticalPad)
             } else if (typeof navigator !== 'undefined' && 'share' in navigator) {
               prefetchFile(data.id, state.fileName)
             } else {
@@ -1058,7 +1059,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 32</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 33</span>
       </footer>
     </div>
   )

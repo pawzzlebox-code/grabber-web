@@ -69,6 +69,27 @@ export async function isWebGpuSupported(): Promise<boolean> {
   }
 }
 
+// --- Subtitle font loading ---
+// Lazy-load Poppins Bold once per worker from Google Fonts. Canvas text needs
+// the font registered with the document FontFaceSet (or the worker's self.fonts)
+// before it can be used — otherwise the canvas silently falls back to default.
+let poppinsLoadPromise: Promise<void> | null = null
+export async function ensurePoppinsLoaded(): Promise<void> {
+  if (poppinsLoadPromise) return poppinsLoadPromise
+  poppinsLoadPromise = (async () => {
+    try {
+      const fontUrl = 'https://fonts.gstatic.com/s/poppins/v22/pxiByp8kv8JHgFVrLGT9Z1xlFQ.woff2'
+      // FontFace works in workers via self.fonts (FontFaceSet)
+      const face = new FontFace('Poppins', `url(${fontUrl})`, { weight: '700', style: 'normal' })
+      await face.load()
+      ;(self as any).fonts?.add?.(face)
+    } catch (err) {
+      console.warn('[font] Failed to load Poppins, falling back to system bold', err)
+    }
+  })()
+  return poppinsLoadPromise
+}
+
 // --- Subtitle rendering ---
 
 export function wrapText(text: string, maxCharsPerLine: number): string[] {
@@ -97,17 +118,18 @@ export function drawSubtitleOnCanvas(
   ch: number,
   videoBottomY: number, // Y coordinate where the actual video frame ends (bottom edge of letterbox content)
 ) {
-  const lines = wrapText(text, 30)
-  // Font size scales with canvas height for readability on any resolution
-  const fontSize = Math.max(22, Math.min(36, Math.round(ch * 0.028)))
-  const lineHeight = Math.round(fontSize * 1.25)
+  // Netflix-style short lines: ~20 chars per line, a few words each
+  const lines = wrapText(text, 20)
+  // Font size scales with canvas height
+  const fontSize = Math.max(24, Math.min(40, Math.round(ch * 0.032)))
+  const lineHeight = Math.round(fontSize * 1.22)
   const outlineWidth = Math.max(4, Math.round(fontSize * 0.22))
 
-  // Gap between the bottom of the video content and the top of the first subtitle line (~40px on a 1280-tall canvas)
-  const gapBelowVideo = Math.round(ch * 0.03)
+  // ~1 cm below the video on a typical phone display (~4% of 1280 = 51px)
+  const gapBelowVideo = Math.round(ch * 0.04)
 
   // Position the FIRST line's baseline just below the video, then stack additional lines downward.
-  // But never let subtitles run off the bottom of the canvas — clamp within a bottom safety margin.
+  // Clamp so multi-line blocks don't run off the bottom of the canvas.
   const minBottomMargin = Math.round(ch * 0.02)
   const blockHeight = lines.length * lineHeight
   let firstLineBaseline = videoBottomY + gapBelowVideo + lineHeight
@@ -115,7 +137,9 @@ export function drawSubtitleOnCanvas(
   if (firstLineBaseline > maxBaseline) firstLineBaseline = maxBaseline
 
   ctx.save()
-  ctx.font = `bold ${fontSize}px Arial, sans-serif`
+  // Poppins is lazy-loaded via ensurePoppinsLoaded() before drawing starts.
+  // If it failed to load, the fallback chain kicks in and we still get bold text.
+  ctx.font = `700 ${fontSize}px "Poppins", "Helvetica Neue", Arial, sans-serif`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'bottom'
   ctx.lineJoin = 'round'
@@ -180,6 +204,10 @@ export function computeLetterboxRect(srcW: number, srcH: number, pad: boolean): 
 
 export async function processVideo(videoBlob: Blob, options: ProcessOptions): Promise<Blob> {
   const subs: Subtitle[] = options.burnSubtitles && options.srt ? parseSrt(options.srt) : []
+
+  // Start loading Poppins in parallel with reading the video. Ensures the
+  // font is ready by the time we draw the first subtitle line.
+  if (options.burnSubtitles) ensurePoppinsLoaded().catch(() => {})
 
   options.onProgress(0, 'Reading video...')
 
