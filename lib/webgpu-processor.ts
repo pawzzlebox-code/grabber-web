@@ -166,8 +166,11 @@ async function initWebGpuPipeline(outW: number, outH: number): Promise<GpuPipeli
 export async function processVideoGpu(videoBlob: Blob, options: ProcessOptions): Promise<Blob> {
   const subs: Subtitle[] = options.burnSubtitles && options.srt ? parseSrt(options.srt) : []
 
-  // Kick off Poppins font load in parallel with reading the video
-  if (options.burnSubtitles) ensurePoppinsLoaded().catch(() => {})
+  // Kick off Poppins font load in parallel with reading the video.
+  // Awaited before the decode loop below so subtitle text actually uses Poppins.
+  const fontReady: Promise<boolean> = options.burnSubtitles
+    ? ensurePoppinsLoaded()
+    : Promise.resolve(false)
 
   options.onProgress(0, 'Reading video...')
 
@@ -240,6 +243,10 @@ export async function processVideoGpu(videoBlob: Blob, options: ProcessOptions):
   // Clear the subtitle canvas once to transparent (initial state: no cue)
   gpu.subCtx.clearRect(0, 0, outW, outH)
   uploadCanvasToTexture(gpu.device, gpu.subCanvas, gpu.subTexture, outW, outH)
+
+  // Block until Poppins is registered in self.fonts, otherwise the first
+  // subtitle cue will render in system default bold.
+  await fontReady
 
   const t0 = performance.now()
 

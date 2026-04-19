@@ -70,21 +70,24 @@ export async function isWebGpuSupported(): Promise<boolean> {
 }
 
 // --- Subtitle font loading ---
-// Lazy-load Poppins Bold once per worker from Google Fonts. Canvas text needs
-// the font registered with the document FontFaceSet (or the worker's self.fonts)
-// before it can be used — otherwise the canvas silently falls back to default.
-let poppinsLoadPromise: Promise<void> | null = null
-export async function ensurePoppinsLoaded(): Promise<void> {
+// Lazy-load Poppins Bold once per worker from our own /public/fonts/ asset so
+// it's same-origin (no CORS, no Cloudflare tunnel interference). The canvas
+// needs the font registered with self.fonts before drawing — otherwise
+// ctx.font silently falls back to system default and the user sees Arial.
+let poppinsLoadPromise: Promise<boolean> | null = null
+export function ensurePoppinsLoaded(): Promise<boolean> {
   if (poppinsLoadPromise) return poppinsLoadPromise
   poppinsLoadPromise = (async () => {
     try {
-      const fontUrl = 'https://fonts.gstatic.com/s/poppins/v22/pxiByp8kv8JHgFVrLGT9Z1xlFQ.woff2'
-      // FontFace works in workers via self.fonts (FontFaceSet)
+      const fontUrl = '/fonts/poppins-bold.woff2'
       const face = new FontFace('Poppins', `url(${fontUrl})`, { weight: '700', style: 'normal' })
       await face.load()
       ;(self as any).fonts?.add?.(face)
-    } catch (err) {
-      console.warn('[font] Failed to load Poppins, falling back to system bold', err)
+      console.log('[font] Poppins loaded OK')
+      return true
+    } catch (err: any) {
+      console.warn('[font] Poppins load failed, using system fallback:', err?.message || err)
+      return false
     }
   })()
   return poppinsLoadPromise
@@ -111,6 +114,16 @@ export function wrapText(text: string, maxCharsPerLine: number): string[] {
   return lines
 }
 
+/** Wrap by word count — takes N whole words per line, Netflix-paced. */
+export function wrapByWords(text: string, maxWordsPerLine: number): string[] {
+  const words = text.replace(/\n/g, ' ').split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  for (let i = 0; i < words.length; i += maxWordsPerLine) {
+    lines.push(words.slice(i, i + maxWordsPerLine).join(' '))
+  }
+  return lines
+}
+
 export function drawSubtitleOnCanvas(
   ctx: OffscreenCanvasRenderingContext2D,
   text: string,
@@ -118,12 +131,11 @@ export function drawSubtitleOnCanvas(
   ch: number,
   videoBottomY: number, // Y coordinate where the actual video frame ends (bottom edge of letterbox content)
 ) {
-  // Netflix-style short lines: ~20 chars per line, a few words each
-  const lines = wrapText(text, 20)
+  // Netflix paces captions: max 4 words per line
+  const lines = wrapByWords(text, 4)
   // Font size scales with canvas height
   const fontSize = Math.max(24, Math.min(40, Math.round(ch * 0.032)))
-  const lineHeight = Math.round(fontSize * 1.22)
-  const outlineWidth = Math.max(4, Math.round(fontSize * 0.22))
+  const lineHeight = Math.round(fontSize * 1.18)
 
   const blockHeight = lines.length * lineHeight
 
@@ -150,24 +162,24 @@ export function drawSubtitleOnCanvas(
   }
 
   ctx.save()
-  // Poppins is lazy-loaded via ensurePoppinsLoaded() before drawing starts.
-  // If it failed to load, the fallback chain kicks in and we still get bold text.
+  // Poppins is awaited before draw via ensurePoppinsLoaded. Fallback chain
+  // handles the rare case where the font load failed entirely.
   ctx.font = `700 ${fontSize}px "Poppins", "Helvetica Neue", Arial, sans-serif`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'bottom'
-  ctx.lineJoin = 'round'
-  ctx.miterLimit = 2
+
+  // Netflix-style soft drop shadow — no hard outline. Shadow params scale
+  // with font size so they look right at any canvas resolution.
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.85)'
+  ctx.shadowOffsetX = 0
+  ctx.shadowOffsetY = Math.max(2, Math.round(fontSize * 0.08))
+  ctx.shadowBlur = Math.max(6, Math.round(fontSize * 0.22))
+
+  ctx.fillStyle = '#ffffff'
 
   const cx = cw / 2
-  // Draw lines top-down starting just below the video
   for (let i = 0; i < lines.length; i++) {
     const y = firstLineBaseline + i * lineHeight
-    // Thick black outline first
-    ctx.lineWidth = outlineWidth
-    ctx.strokeStyle = '#000000'
-    ctx.strokeText(lines[i], cx, y)
-    // White fill on top
-    ctx.fillStyle = '#ffffff'
     ctx.fillText(lines[i], cx, y)
   }
   ctx.restore()
@@ -218,9 +230,13 @@ export function computeLetterboxRect(srcW: number, srcH: number, pad: boolean): 
 export async function processVideo(videoBlob: Blob, options: ProcessOptions): Promise<Blob> {
   const subs: Subtitle[] = options.burnSubtitles && options.srt ? parseSrt(options.srt) : []
 
-  // Start loading Poppins in parallel with reading the video. Ensures the
-  // font is ready by the time we draw the first subtitle line.
-  if (options.burnSubtitles) ensurePoppinsLoaded().catch(() => {})
+  // Start loading Poppins in parallel with reading the video so the font is
+  // ready by the time we draw the first subtitle line. Promise is kicked off
+  // here; we await it below right before the decode loop so the first frame
+  // never beats the font to the canvas.
+  const fontReady: Promise<boolean> = options.burnSubtitles
+    ? ensurePoppinsLoaded()
+    : Promise.resolve(false)
 
   options.onProgress(0, 'Reading video...')
 
@@ -305,6 +321,10 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
     ctx.fillStyle = '#000000'
     ctx.fillRect(0, 0, outW, outH)
   }
+
+  // Make sure the font is registered in self.fonts before we start drawing
+  // so ctx.font with "Poppins" actually renders in Poppins (not system fallback).
+  await fontReady
 
   const t0 = performance.now()
   let tDecode = 0, tDraw = 0, tEncode = 0
