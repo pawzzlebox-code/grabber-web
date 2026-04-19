@@ -125,16 +125,29 @@ export function drawSubtitleOnCanvas(
   const lineHeight = Math.round(fontSize * 1.22)
   const outlineWidth = Math.max(4, Math.round(fontSize * 0.22))
 
-  // ~1 cm below the video on a typical phone display (~4% of 1280 = 51px)
-  const gapBelowVideo = Math.round(ch * 0.04)
-
-  // Position the FIRST line's baseline just below the video, then stack additional lines downward.
-  // Clamp so multi-line blocks don't run off the bottom of the canvas.
-  const minBottomMargin = Math.round(ch * 0.02)
   const blockHeight = lines.length * lineHeight
-  let firstLineBaseline = videoBottomY + gapBelowVideo + lineHeight
-  const maxBaseline = ch - minBottomMargin - (blockHeight - lineHeight)
-  if (firstLineBaseline > maxBaseline) firstLineBaseline = maxBaseline
+
+  // Two placement modes depending on whether there's a black bar below the video:
+  // - "Under video" (letterboxed): subs sit in the black bar, just below the video content
+  // - "Overlay" (video fills canvas): subs sit over the video at ~85% of height, Netflix/cinema style
+  const videoFillsCanvas = videoBottomY >= ch - Math.round(ch * 0.02) // no meaningful bar below
+  let firstLineBaseline: number
+  if (videoFillsCanvas) {
+    // Cinema-style: anchor the block so its bottom line sits around 88% of canvas height
+    const anchorBottom = Math.round(ch * 0.88)
+    firstLineBaseline = anchorBottom - (lines.length - 1) * lineHeight
+    // Guarantee minimum margin from top of video (don't place too high on short clips)
+    const minTop = Math.round(ch * 0.55)
+    if (firstLineBaseline < minTop) firstLineBaseline = minTop
+  } else {
+    // ~1 cm below the video content (~4% of canvas height on a phone)
+    const gapBelowVideo = Math.round(ch * 0.04)
+    firstLineBaseline = videoBottomY + gapBelowVideo + lineHeight
+    // Clamp so multi-line blocks don't run off the bottom of the canvas
+    const minBottomMargin = Math.round(ch * 0.02)
+    const maxBaseline = ch - minBottomMargin - (blockHeight - lineHeight)
+    if (firstLineBaseline > maxBaseline) firstLineBaseline = maxBaseline
+  }
 
   ctx.save()
   // Poppins is lazy-loaded via ensurePoppinsLoaded() before drawing starts.
