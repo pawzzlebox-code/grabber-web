@@ -300,13 +300,11 @@ export default function GrabberApp() {
 
           if (state.status === 'done' && !donePrefetched) {
             donePrefetched = true
-            const useInstant = settings.instantMode && webCodecsSupported && settings.burnSubtitles
-            if (useInstant && state.srt) {
-              // Instant mode: fetch raw video, process on-device with WebCodecs
-              // In instant mode the server does NOT pre-pad (so WebCodecs knows
-              // where video content ends and places subtitles correctly below it).
-              // Pass the user's 9:16 toggle through so WebCodecs does the pad itself.
-              prefetchAndProcess(data.id, state.fileName, state.srt, settings.verticalPad)
+            const useInstant = settings.instantMode && webCodecsSupported && (settings.burnSubtitles || settings.verticalPad)
+            if (useInstant) {
+              // Instant mode: fetch raw video, process on-device with WebCodecs.
+              // Server skips ffmpeg pad AND (if subs off) Groq — client does it all.
+              prefetchAndProcess(data.id, state.fileName, state.srt || '', settings.verticalPad, settings.burnSubtitles)
             } else if (typeof navigator !== 'undefined' && 'share' in navigator) {
               prefetchFile(data.id, state.fileName)
             } else {
@@ -383,7 +381,7 @@ export default function GrabberApp() {
 
   // Instant mode: fetch raw video from server, then process locally via WebCodecs worker.
   // Shows green "Preparing..." during fetch, then cyan "Processing on device..." during encode.
-  const prefetchAndProcess = async (id: string, fileName: string, srt: string, padTo9x16: boolean) => {
+  const prefetchAndProcess = async (id: string, fileName: string, srt: string, padTo9x16: boolean, burnSubtitles: boolean) => {
     const fileUrl = `/api/file/${id}`
     const name = fileName || 'video.mp4'
 
@@ -426,7 +424,7 @@ export default function GrabberApp() {
 
       const handle = runWorker(
         rawBlob,
-        { padTo9x16, burnSubtitles: true, srt },
+        { padTo9x16, burnSubtitles, srt },
         (pct, stage) => {
           setInstantProgress(prev => ({ ...prev, [id]: { pct, stage } }))
         },
@@ -1059,7 +1057,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 38</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 39</span>
       </footer>
     </div>
   )

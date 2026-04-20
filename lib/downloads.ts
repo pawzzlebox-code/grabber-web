@@ -886,14 +886,16 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           notify(job, { type: 'done', fileName: job.fileName! })
         }
 
-        // Instant mode + subtitles: server only generates SRT, client does
-        // both the 9:16 pad AND the subtitle burn in one WebCodecs pass.
-        // This is critical because the subtitle renderer needs to know where
-        // the actual video content ends (so it can draw subs 1cm below it).
-        // If the server pre-pads the video, the client sees a full-canvas
-        // video and subtitle positioning breaks.
-        if (instantMode && burnSubtitles && isVideo) {
-          generateSubtitlesOnly(job, runDone)
+        // Instant mode: client does ALL re-encoding (pad, subtitle burn, both).
+        // Server only runs Groq when subtitles are requested — otherwise hand
+        // over the raw downloaded file untouched. Skipping ffmpeg on the $4
+        // droplet makes pad-only flows ~10× faster than the server path.
+        if (instantMode && isVideo) {
+          if (burnSubtitles) {
+            generateSubtitlesOnly(job, runDone)
+          } else {
+            runDone()
+          }
           return
         }
 
