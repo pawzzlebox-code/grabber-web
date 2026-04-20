@@ -16,6 +16,7 @@ import {
   QUALITY_HIGH,
 } from 'mediabunny'
 import { parseSrt, findActiveSubtitle, splitLongCues, type Subtitle } from './srt-parser'
+import { POPPINS_BOLD_WOFF2_BASE64 } from './poppins-bold-data'
 
 export interface ProcessOptions {
   padTo9x16: boolean
@@ -70,35 +71,27 @@ export async function isWebGpuSupported(): Promise<boolean> {
 }
 
 // --- Subtitle font loading ---
-// Lazy-load Poppins Bold once per worker from our own /public/fonts/ asset so
-// it's same-origin (no CORS, no Cloudflare tunnel interference). The canvas
-// needs the font registered with self.fonts before drawing — otherwise
-// ctx.font silently falls back to system default and the user sees Arial.
+// Poppins Bold is inlined as base64 in poppins-bold-data.ts — no network fetch
+// ever happens. This eliminates an entire class of failure (404s, DNS, CORS,
+// Cloudflare tunnel buffering). The canvas still needs the font registered
+// with self.fonts before drawing, but that's a synchronous-ish local decode.
 let poppinsLoadPromise: Promise<boolean> | null = null
 export function ensurePoppinsLoaded(): Promise<boolean> {
   if (poppinsLoadPromise) return poppinsLoadPromise
   poppinsLoadPromise = (async () => {
-    // Hard cap the font load — if the asset server is broken (404 or hangs),
-    // we must NOT block the whole decode pipeline. Worst case we fall back to
-    // system bold for a few frames.
-    const timeoutMs = 3000
-    const timeout = new Promise<false>(resolve => setTimeout(() => resolve(false), timeoutMs))
-    const load = (async () => {
-      try {
-        const fontUrl = '/fonts/poppins-bold.woff2'
-        const face = new FontFace('Poppins', `url(${fontUrl})`, { weight: '700', style: 'normal' })
-        await face.load()
-        ;(self as any).fonts?.add?.(face)
-        console.log('[font] Poppins loaded OK')
-        return true
-      } catch (err: any) {
-        console.warn('[font] Poppins load failed, using system fallback:', err?.message || err)
-        return false
-      }
-    })()
-    const result = await Promise.race([load, timeout])
-    if (!result) console.warn(`[font] Poppins not ready after ${timeoutMs}ms — proceeding with fallback`)
-    return result
+    try {
+      const bin = atob(POPPINS_BOLD_WOFF2_BASE64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const face = new FontFace('Poppins', bytes.buffer, { weight: '700', style: 'normal' })
+      await face.load()
+      ;(self as any).fonts?.add?.(face)
+      console.log('[font] Poppins loaded OK (inlined)')
+      return true
+    } catch (err: any) {
+      console.warn('[font] Poppins inline load failed, using system fallback:', err?.message || err)
+      return false
+    }
   })()
   return poppinsLoadPromise
 }
