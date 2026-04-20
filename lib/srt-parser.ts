@@ -50,3 +50,39 @@ export function findActiveSubtitle(subs: Subtitle[], timestampUs: number): Subti
   }
   return null
 }
+
+/**
+ * Split long cues into shorter sequential chunks, Netflix-style.
+ * Groq often returns 20+ word cues spanning 5+ seconds; showing the whole
+ * block at once is unreadable. This splits into chunks of ~maxWords words,
+ * dividing the original cue's time range proportionally.
+ *
+ * Example: a 6-second cue with 24 words → 3 sub-cues of 8 words × 2 seconds each.
+ */
+export function splitLongCues(subs: Subtitle[], maxWords = 8): Subtitle[] {
+  const out: Subtitle[] = []
+  for (const sub of subs) {
+    const words = sub.text.replace(/\n/g, ' ').split(/\s+/).filter(Boolean)
+    if (words.length <= maxWords) {
+      out.push(sub)
+      continue
+    }
+    const totalChunks = Math.ceil(words.length / maxWords)
+    const cueDur = sub.end - sub.start
+    const chunkDur = cueDur / totalChunks
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkWords = words.slice(i * maxWords, (i + 1) * maxWords)
+      const chunkStart = sub.start + Math.round(chunkDur * i)
+      // Last chunk inherits the original cue's end timestamp to avoid rounding drift
+      const chunkEnd = i === totalChunks - 1
+        ? sub.end
+        : sub.start + Math.round(chunkDur * (i + 1))
+      out.push({
+        start: chunkStart,
+        end: chunkEnd,
+        text: chunkWords.join(' '),
+      })
+    }
+  }
+  return out
+}

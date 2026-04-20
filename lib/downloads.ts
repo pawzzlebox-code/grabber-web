@@ -399,9 +399,13 @@ async function convertToVertical(job: DownloadJob, onComplete: () => void): Prom
     const ffmpegArgs = [
       '-i', inputPath,
       '-vf', vf,
-      // veryfast preset (not ultrafast — ultrafast forces Constrained Baseline profile
-      // which Instagram can't decode properly, showing grey)
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+      // superfast preset — ~2x faster than veryfast on the tiny droplet, still
+      // respects -profile:v main (unlike ultrafast which forces Constrained
+      // Baseline → Instagram shows grey). -threads 0 uses all CPU cores,
+      // -tune fastdecode trades a bit of compression for encode speed.
+      '-c:v', 'libx264', '-preset', 'superfast', '-crf', '22',
+      '-tune', 'fastdecode',
+      '-threads', '0',
       '-pix_fmt', 'yuv420p',
       '-profile:v', 'main', '-level', '4.0',
       '-c:a', 'copy',

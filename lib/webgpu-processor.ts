@@ -24,7 +24,7 @@ import {
 } from 'mediabunny'
 import type { ProcessOptions } from './webcodecs-processor'
 import { computeLetterboxRect, drawSubtitleOnCanvas, ensurePoppinsLoaded } from './webcodecs-processor'
-import { parseSrt, type Subtitle } from './srt-parser'
+import { parseSrt, splitLongCues, type Subtitle } from './srt-parser'
 
 // WebGPU types come from `lib.dom.d.ts` only when @webgpu/types is installed.
 // Cast aggressively to any so the code compiles without that dep.
@@ -164,7 +164,8 @@ async function initWebGpuPipeline(outW: number, outH: number): Promise<GpuPipeli
 // --- Main pipeline ---
 
 export async function processVideoGpu(videoBlob: Blob, options: ProcessOptions): Promise<Blob> {
-  const subs: Subtitle[] = options.burnSubtitles && options.srt ? parseSrt(options.srt) : []
+  const rawSubs: Subtitle[] = options.burnSubtitles && options.srt ? parseSrt(options.srt) : []
+  const subs: Subtitle[] = splitLongCues(rawSubs, 8)
 
   // Kick off Poppins font load in parallel with reading the video.
   // Awaited before the decode loop below so subtitle text actually uses Poppins.

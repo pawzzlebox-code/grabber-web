@@ -15,7 +15,7 @@ import {
   EncodedAudioPacketSource,
   QUALITY_HIGH,
 } from 'mediabunny'
-import { parseSrt, findActiveSubtitle, type Subtitle } from './srt-parser'
+import { parseSrt, findActiveSubtitle, splitLongCues, type Subtitle } from './srt-parser'
 
 export interface ProcessOptions {
   padTo9x16: boolean
@@ -228,7 +228,9 @@ export function computeLetterboxRect(srcW: number, srcH: number, pad: boolean): 
 // --- Main pipeline ---
 
 export async function processVideo(videoBlob: Blob, options: ProcessOptions): Promise<Blob> {
-  const subs: Subtitle[] = options.burnSubtitles && options.srt ? parseSrt(options.srt) : []
+  // Parse + chunk long cues into Netflix-paced sub-cues (max 8 words each)
+  const rawSubs: Subtitle[] = options.burnSubtitles && options.srt ? parseSrt(options.srt) : []
+  const subs: Subtitle[] = splitLongCues(rawSubs, 8)
 
   // Start loading Poppins in parallel with reading the video so the font is
   // ready by the time we draw the first subtitle line. Promise is kicked off
