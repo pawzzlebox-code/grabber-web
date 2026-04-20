@@ -78,17 +78,27 @@ let poppinsLoadPromise: Promise<boolean> | null = null
 export function ensurePoppinsLoaded(): Promise<boolean> {
   if (poppinsLoadPromise) return poppinsLoadPromise
   poppinsLoadPromise = (async () => {
-    try {
-      const fontUrl = '/fonts/poppins-bold.woff2'
-      const face = new FontFace('Poppins', `url(${fontUrl})`, { weight: '700', style: 'normal' })
-      await face.load()
-      ;(self as any).fonts?.add?.(face)
-      console.log('[font] Poppins loaded OK')
-      return true
-    } catch (err: any) {
-      console.warn('[font] Poppins load failed, using system fallback:', err?.message || err)
-      return false
-    }
+    // Hard cap the font load — if the asset server is broken (404 or hangs),
+    // we must NOT block the whole decode pipeline. Worst case we fall back to
+    // system bold for a few frames.
+    const timeoutMs = 3000
+    const timeout = new Promise<false>(resolve => setTimeout(() => resolve(false), timeoutMs))
+    const load = (async () => {
+      try {
+        const fontUrl = '/fonts/poppins-bold.woff2'
+        const face = new FontFace('Poppins', `url(${fontUrl})`, { weight: '700', style: 'normal' })
+        await face.load()
+        ;(self as any).fonts?.add?.(face)
+        console.log('[font] Poppins loaded OK')
+        return true
+      } catch (err: any) {
+        console.warn('[font] Poppins load failed, using system fallback:', err?.message || err)
+        return false
+      }
+    })()
+    const result = await Promise.race([load, timeout])
+    if (!result) console.warn(`[font] Poppins not ready after ${timeoutMs}ms — proceeding with fallback`)
+    return result
   })()
   return poppinsLoadPromise
 }
