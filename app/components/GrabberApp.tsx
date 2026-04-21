@@ -87,6 +87,12 @@ export default function GrabberApp() {
   const [canShare, setCanShare] = useState(false)
   const [saveProgress, setSaveProgress] = useState<Record<string, number>>({})
   const fileCache = useRef<Record<string, File>>({})
+  // iOS Safari leaks navigator.share state across calls — once a share throws
+  // InvalidStateError the state is stuck until the tab reloads. Track whether
+  // a share is currently in flight so repeat taps don't pile on, and detect
+  // the stuck-state via the error to fall back to blob-URL download.
+  const shareInFlight = useRef(false)
+  const shareStateBroken = useRef(false)
   const [fileReady, setFileReady] = useState<Record<string, boolean>>({})
   const [debugLogs, setDebugLogs] = useState<string[]>([])
   const [showDebug, setShowDebug] = useState(false)
@@ -477,17 +483,41 @@ export default function GrabberApp() {
 
     setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Save: ${safeName} (${Math.round(safeFile.size / 1024)}KB)`])
 
-    if (navigator.canShare && !navigator.canShare({ files: [safeFile] })) {
-      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] canShare() returned false`])
+    // Once iOS Safari's share state is broken, navigator.share() throws
+    // InvalidStateError forever (only a tab reload clears it). Skip straight
+    // to the blob-URL download in that case so the user still gets the file.
+    if (shareStateBroken.current) {
+      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Safari share stuck — using download fallback`])
+      handleDirectDownload(id, fileName)
       return
     }
 
+    if (shareInFlight.current) {
+      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Share already pending — ignoring tap`])
+      return
+    }
+
+    if (navigator.canShare && !navigator.canShare({ files: [safeFile] })) {
+      setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] canShare() returned false`])
+      handleDirectDownload(id, fileName)
+      return
+    }
+
+    shareInFlight.current = true
     try {
       await navigator.share({ files: [safeFile] })
       setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Share sheet opened`])
     } catch (err: any) {
       setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Share error: ${err?.name} - ${err?.message}`])
       if (err?.name === 'AbortError') return
+      if (err?.name === 'InvalidStateError') {
+        // Safari's share state is stuck — every subsequent share() will throw
+        // until the tab reloads. Mark it broken so future taps take the fallback.
+        shareStateBroken.current = true
+        handleDirectDownload(id, fileName)
+      }
+    } finally {
+      shareInFlight.current = false
     }
   }
 
@@ -1057,7 +1087,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 39</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 40</span>
       </footer>
     </div>
   )
