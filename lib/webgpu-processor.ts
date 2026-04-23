@@ -266,7 +266,7 @@ export async function processVideoGpu(videoBlob: Blob, options: ProcessOptions):
         if (activeIdx !== currentSubIndex) {
           gpu.subCtx.clearRect(0, 0, outW, outH)
           if (activeIdx >= 0) {
-            drawSubtitleOnCanvas(gpu.subCtx, subs[activeIdx].text, outW, outH, drawY + drawH)
+            drawSubtitleOnCanvas(gpu.subCtx, subs[activeIdx].text, outW, outH, drawY + drawH, subs[activeIdx].style)
           }
           uploadCanvasToTexture(gpu.device, gpu.subCanvas, gpu.subTexture, outW, outH)
           currentSubIndex = activeIdx

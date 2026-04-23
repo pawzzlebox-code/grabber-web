@@ -1,7 +1,23 @@
+export type SubtitleStyle = 'bold' | 'italic' | 'normal'
+
 export interface Subtitle {
   start: number // microseconds
   end: number // microseconds
   text: string
+  style?: SubtitleStyle
+}
+
+// Strip whole-cue inline style tags and return the cue's style + plain text.
+// We only handle <b>…</b> and <i>…</i> wrapping the entire cue — mixed inline
+// styling is out of scope. Matches the output format from tools/style_srt.py,
+// which tags every cue by speaker role (main = bold, others = italic).
+function extractStyle(raw: string): { text: string; style: SubtitleStyle } {
+  const trimmed = raw.trim()
+  const boldMatch = /^<b>([\s\S]*)<\/b>$/i.exec(trimmed)
+  if (boldMatch) return { text: boldMatch[1].trim(), style: 'bold' }
+  const italicMatch = /^<i>([\s\S]*)<\/i>$/i.exec(trimmed)
+  if (italicMatch) return { text: italicMatch[1].trim(), style: 'italic' }
+  return { text: trimmed, style: 'normal' }
 }
 
 // Parses standard SRT format into subtitle entries with timestamps in microseconds.
@@ -32,10 +48,14 @@ export function parseSrt(text: string): Subtitle[] {
     const subtitleText = lines.slice(timingLineIdx + 1).join('\n').trim()
     if (!subtitleText) continue
 
+    const { text, style } = extractStyle(subtitleText)
+    if (!text) continue
+
     entries.push({
       start: startMs * 1000, // microseconds
       end: endMs * 1000, // microseconds
-      text: subtitleText,
+      text,
+      style,
     })
   }
 
@@ -81,6 +101,7 @@ export function splitLongCues(subs: Subtitle[], maxWords = 8): Subtitle[] {
         start: chunkStart,
         end: chunkEnd,
         text: chunkWords.join(' '),
+        style: sub.style,
       })
     }
   }

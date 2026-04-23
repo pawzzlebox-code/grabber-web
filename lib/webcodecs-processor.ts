@@ -15,7 +15,7 @@ import {
   EncodedAudioPacketSource,
   QUALITY_HIGH,
 } from 'mediabunny'
-import { parseSrt, findActiveSubtitle, splitLongCues, type Subtitle } from './srt-parser'
+import { parseSrt, findActiveSubtitle, splitLongCues, type Subtitle, type SubtitleStyle } from './srt-parser'
 import { POPPINS_BOLD_WOFF2_BASE64 } from './poppins-bold-data'
 
 export interface ProcessOptions {
@@ -133,6 +133,7 @@ export function drawSubtitleOnCanvas(
   cw: number,
   ch: number,
   videoBottomY: number, // Y coordinate where the actual video frame ends (bottom edge of letterbox content)
+  style: SubtitleStyle = 'normal',
 ) {
   // Netflix paces captions: max 4 words per line
   const lines = wrapByWords(text, 4)
@@ -165,9 +166,14 @@ export function drawSubtitleOnCanvas(
   }
 
   ctx.save()
+  // Per-cue styling: main speaker = bold (700), interviewer = italic, plain
+  // Groq cues (no tag) = normal bold. Canvas synthesizes italic from Poppins
+  // Bold when we pass `italic` + `700` — no separate italic font file needed.
+  const isItalic = style === 'italic'
+  const fontSpec = `${isItalic ? 'italic ' : ''}700 ${fontSize}px "Poppins", "Helvetica Neue", Arial, sans-serif`
   // Poppins is awaited before draw via ensurePoppinsLoaded. Fallback chain
   // handles the rare case where the font load failed entirely.
-  ctx.font = `700 ${fontSize}px "Poppins", "Helvetica Neue", Arial, sans-serif`
+  ctx.font = fontSpec
   ctx.textAlign = 'center'
   ctx.textBaseline = 'bottom'
 
@@ -347,7 +353,7 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
         const ts = sample.microsecondTimestamp
         const active = findActiveSubtitle(subs, ts)
         if (active) {
-          drawSubtitleOnCanvas(ctx, active.text, outW, outH, drawY + drawH)
+          drawSubtitleOnCanvas(ctx, active.text, outW, outH, drawY + drawH, active.style)
         }
       }
 
