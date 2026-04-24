@@ -247,7 +247,11 @@ export default function GrabberApp() {
     } finally {
       setLoading(false)
     }
-  }, [])
+    // Deps matter: apiBase/apiHeaders close over settings.useMyDesktop,
+    // desktopTunnelUrl, and settings.desktopKey — without these in deps,
+    // the callback keeps using first-render values and routes to the droplet
+    // even after the desktop tunnel is registered.
+  }, [settings.useMyDesktop, desktopTunnelUrl, settings.desktopKey])
 
   const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string) => {
     // Direct download mode: browser fetches from source URL
@@ -1166,7 +1170,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 45</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 46</span>
       </footer>
     </div>
   )
