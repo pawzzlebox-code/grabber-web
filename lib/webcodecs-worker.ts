@@ -43,19 +43,18 @@ async function runWithFallback(
   videoBlob: Blob,
   options: ProcessOptions,
 ): Promise<Blob> {
-  const gpuOk = await isWebGpuSupported().catch(() => false)
-  if (gpuOk) {
-    try {
-      console.log('[worker] Using WebGPU pipeline')
-      return await processVideoGpu(videoBlob, options)
-    } catch (err: any) {
-      console.warn('[worker] WebGPU failed, falling back to 2D canvas:', err?.message || err)
-      // Surface this to the user so they see the path switch, not a silent failure
-      try { options.onProgress(0, 'GPU path failed, retrying with canvas...') } catch {}
-    }
-  } else {
-    console.log('[worker] WebGPU unavailable — using 2D canvas pipeline')
-  }
+  // WebGPU pipeline is disabled pending a fix — on Chrome desktop it hangs
+  // silently inside the decode-composite-encode loop after ~5% (likely a
+  // mediabunny<->WebGPU canvas interop issue). The "throw => fallback"
+  // guard below doesn't catch a hang, so we default to the 2D canvas path.
+  // The 2D canvas path uses the SAME hardware H.264 encoder (NVENC / AMF /
+  // QuickSync) via WebCodecs — the only thing WebGPU saved was a readback
+  // for compositing, which is negligible compared to encode time. Net perf
+  // loss on desktop: effectively zero. Re-enable once the hang is traced.
+  console.log('[worker] Using 2D canvas pipeline (hardware H.264 encoder)')
+  // Silence unused-import warnings — processVideoGpu + isWebGpuSupported
+  // remain wired so re-enabling is a one-line change.
+  void processVideoGpu; void isWebGpuSupported
   return await processVideo(videoBlob, options)
 }
 
