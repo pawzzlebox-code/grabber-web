@@ -121,21 +121,30 @@ export default function GrabberApp() {
   }, [])
 
   // If "Use my desktop" is on, ask the droplet for the registered tunnel URL.
-  // Re-check whenever the toggle flips. On failure / 404, leave tunnel null so
-  // requests fall through to same-origin (droplet) — graceful degradation.
+  // The desktop app registers asynchronously (cloudflared takes ~10s to boot),
+  // and its URL rotates on every restart. Poll every 20s + refetch on focus
+  // so the UI picks up the current URL without a full page reload.
   useEffect(() => {
     if (!settings.useMyDesktop) { setDesktopTunnelUrl(null); return }
     let cancelled = false
-    ;(async () => {
+    const fetchUrl = async () => {
       try {
-        const res = await fetch('/api/desktop')
+        const res = await fetch('/api/desktop', { cache: 'no-store' })
         const data = await res.json()
         if (!cancelled) setDesktopTunnelUrl(data.tunnelUrl || null)
       } catch {
         if (!cancelled) setDesktopTunnelUrl(null)
       }
-    })()
-    return () => { cancelled = true }
+    }
+    fetchUrl()
+    const interval = setInterval(fetchUrl, 20_000)
+    const onFocus = () => fetchUrl()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
+    }
   }, [settings.useMyDesktop])
 
   // All API calls route through this. Returns '' (same-origin) unless a
@@ -1170,7 +1179,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 46</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 47</span>
       </footer>
     </div>
   )
