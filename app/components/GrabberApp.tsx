@@ -34,7 +34,7 @@ interface DownloadJob {
 }
 
 // Persist settings in localStorage
-const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false, directDownload: false, burnSubtitles: false, instantMode: false }
+const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false, directDownload: false, burnSubtitles: false, instantMode: false, useMyDesktop: false, desktopKey: '' }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -102,6 +102,11 @@ export default function GrabberApp() {
   // client would try to pad the already-padded video. We gate Fetch on
   // this promise to avoid that race.
   const webCodecsProbe = useRef<Promise<boolean> | null>(null)
+  // When Use-My-Desktop is on and a tunnel URL is registered on the droplet,
+  // all /api/download /api/progress/:id /api/file/:id /api/cancel/:id calls
+  // are routed to the tunnel instead of the droplet. The desktop's local HTTP
+  // server exposes the same endpoints, so no other code needs to change.
+  const [desktopTunnelUrl, setDesktopTunnelUrl] = useState<string | null>(null)
   const [instantProgress, setInstantProgress] = useState<Record<string, { pct: number; stage: string }>>({})
   // Tracks in-flight download IDs that can be cancelled. Holds AbortControllers + worker handles.
   const cancelHandles = useRef<Record<string, {
@@ -114,6 +119,38 @@ export default function GrabberApp() {
     webCodecsProbe.current = isWebCodecsSupported().catch(() => false)
     webCodecsProbe.current.then(setWebCodecsSupported)
   }, [])
+
+  // If "Use my desktop" is on, ask the droplet for the registered tunnel URL.
+  // Re-check whenever the toggle flips. On failure / 404, leave tunnel null so
+  // requests fall through to same-origin (droplet) — graceful degradation.
+  useEffect(() => {
+    if (!settings.useMyDesktop) { setDesktopTunnelUrl(null); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/desktop')
+        const data = await res.json()
+        if (!cancelled) setDesktopTunnelUrl(data.tunnelUrl || null)
+      } catch {
+        if (!cancelled) setDesktopTunnelUrl(null)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [settings.useMyDesktop])
+
+  // All API calls route through this. Returns '' (same-origin) unless a
+  // desktop tunnel is registered AND the user opted in.
+  const apiBase = () => (settings.useMyDesktop && desktopTunnelUrl) ? desktopTunnelUrl : ''
+
+  // Desktop endpoints require the cookie key for auth; droplet doesn't care.
+  const apiHeaders = (json: boolean): Record<string, string> => {
+    const h: Record<string, string> = {}
+    if (json) h['Content-Type'] = 'application/json'
+    if (settings.useMyDesktop && desktopTunnelUrl && settings.desktopKey) {
+      h['x-cookie-key'] = settings.desktopKey
+    }
+    return h
+  }
 
   useEffect(() => {
     // Check if browser supports sharing files (not just text/URLs)
@@ -194,7 +231,7 @@ export default function GrabberApp() {
     autoTriggered.current = false
 
     try {
-      const res = await fetch(`/api/info?url=${encodeURIComponent(videoUrl.trim())}`)
+      const res = await fetch(`${apiBase()}/api/info?url=${encodeURIComponent(videoUrl.trim())}`, { headers: apiHeaders(false) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to fetch')
       const vids: VideoInfo[] = data.videos || (data.id ? [data] : [])
@@ -216,9 +253,9 @@ export default function GrabberApp() {
     // Direct download mode: browser fetches from source URL
     if (settings.directDownload) {
       try {
-        const r = await fetch('/api/geturl', {
+        const r = await fetch(`${apiBase()}/api/geturl`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders(true),
           body: JSON.stringify({ url: video.url, formatId }),
         })
         const data = await r.json()
@@ -243,9 +280,9 @@ export default function GrabberApp() {
     // regularly beats the probe otherwise.
     const probed = webCodecsProbe.current ? await webCodecsProbe.current : false
     try {
-      const res = await fetch('/api/download', {
+      const res = await fetch(`${apiBase()}/api/download`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(true),
         body: JSON.stringify({
           url: video.url,
           formatId,
@@ -286,7 +323,7 @@ export default function GrabberApp() {
       const poll = async () => {
         if (stopped) return
         try {
-          const r = await fetch(`/api/progress/${data.id}?logsSince=${logsSince}`, { cache: 'no-store' })
+          const r = await fetch(`${apiBase()}/api/progress/${data.id}?logsSince=${logsSince}`, { cache: 'no-store', headers: apiHeaders(false) })
           if (!r.ok) {
             console.error('[poll] HTTP', r.status)
             return
@@ -356,11 +393,11 @@ export default function GrabberApp() {
 
   // Pre-fetch file from server into cache (with progress), called automatically when download completes on mobile
   const prefetchFile = async (id: string, fileName: string) => {
-    const fileUrl = `/api/file/${id}`
+    const fileUrl = `${apiBase()}/api/file/${id}`
     const name = fileName || 'video.mp4'
     try {
       setSaveProgress(prev => ({ ...prev, [id]: 0 }))
-      const res = await fetch(fileUrl)
+      const res = await fetch(fileUrl, { headers: apiHeaders(false) })
       const contentLength = res.headers.get('content-length')
       const total = contentLength ? parseInt(contentLength, 10) : 0
 
@@ -399,7 +436,7 @@ export default function GrabberApp() {
   // Instant mode: fetch raw video from server, then process locally via WebCodecs worker.
   // Shows green "Preparing..." during fetch, then cyan "Processing on device..." during encode.
   const prefetchAndProcess = async (id: string, fileName: string, srt: string, padTo9x16: boolean, burnSubtitles: boolean) => {
-    const fileUrl = `/api/file/${id}`
+    const fileUrl = `${apiBase()}/api/file/${id}`
     const name = fileName || 'video.mp4'
 
     // Register abort controller for the fetch (cancel button can trigger this)
@@ -410,7 +447,7 @@ export default function GrabberApp() {
     try {
       // Step 1: fetch raw video from server with progress (same as prefetchFile)
       setSaveProgress(prev => ({ ...prev, [id]: 0 }))
-      const res = await fetch(fileUrl, { signal: ac.signal })
+      const res = await fetch(fileUrl, { signal: ac.signal, headers: apiHeaders(false) })
       const contentLength = res.headers.get('content-length')
       const total = contentLength ? parseInt(contentLength, 10) : 0
       let rawBlob: Blob
@@ -552,7 +589,7 @@ export default function GrabberApp() {
 
   // Desktop fallback — normal browser download
   const triggerFileDownload = (id: string, fileName: string) => {
-    const fileUrl = `/api/file/${id}`
+    const fileUrl = `${apiBase()}/api/file/${id}`
     const name = fileName || 'video.mp4'
     const a = document.createElement('a')
     a.href = fileUrl
@@ -622,7 +659,7 @@ export default function GrabberApp() {
 
     // 2. Tell server to kill child processes and delete the file
     try {
-      await fetch(`/api/cancel/${id}`, { method: 'POST', cache: 'no-store' })
+      await fetch(`${apiBase()}/api/cancel/${id}`, { method: 'POST', cache: 'no-store', headers: apiHeaders(false) })
     } catch (err) {
       console.error('[cancel] server request failed', err)
     }
@@ -762,6 +799,37 @@ export default function GrabberApp() {
                 <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-cyan-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
               </label>
             </div>
+          )}
+
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-white">🖥️ Use my desktop (fastest)</p>
+              <p className="text-[11px] text-neutral-500">
+                {desktopTunnelUrl
+                  ? `Routing through your desktop — ${new URL(desktopTunnelUrl).hostname}`
+                  : settings.useMyDesktop
+                    ? 'No desktop registered. Start the Grabber desktop app with this cookie key.'
+                    : 'Routes downloads through your home PC (NVENC, no server bottleneck)'}
+              </p>
+            </div>
+            <label className="relative inline-flex cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.useMyDesktop}
+                onChange={(e) => setSettings(s => ({ ...s, useMyDesktop: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-emerald-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+            </label>
+          </div>
+          {settings.useMyDesktop && (
+            <input
+              type="password"
+              placeholder="Desktop cookie key"
+              value={settings.desktopKey}
+              onChange={(e) => setSettings(s => ({ ...s, desktopKey: e.target.value }))}
+              className="w-full mt-1 px-3 py-2 text-xs bg-[#111] border border-[#2a2a2a] rounded-md text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+            />
           )}
 
           <div className="pt-1">
@@ -1098,7 +1166,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 44</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 45</span>
       </footer>
     </div>
   )
