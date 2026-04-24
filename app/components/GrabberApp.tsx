@@ -97,6 +97,11 @@ export default function GrabberApp() {
   const [debugLogs, setDebugLogs] = useState<string[]>([])
   const [showDebug, setShowDebug] = useState(false)
   const [webCodecsSupported, setWebCodecsSupported] = useState(false)
+  // The probe is async. If Fetch fires before it resolves, we'd send
+  // instantMode=false to the server (making it do the pad) and THEN the
+  // client would try to pad the already-padded video. We gate Fetch on
+  // this promise to avoid that race.
+  const webCodecsProbe = useRef<Promise<boolean> | null>(null)
   const [instantProgress, setInstantProgress] = useState<Record<string, { pct: number; stage: string }>>({})
   // Tracks in-flight download IDs that can be cancelled. Holds AbortControllers + worker handles.
   const cancelHandles = useRef<Record<string, {
@@ -106,7 +111,8 @@ export default function GrabberApp() {
   }>>({})
 
   useEffect(() => {
-    isWebCodecsSupported().then(setWebCodecsSupported).catch(() => setWebCodecsSupported(false))
+    webCodecsProbe.current = isWebCodecsSupported().catch(() => false)
+    webCodecsProbe.current.then(setWebCodecsSupported)
   }, [])
 
   useEffect(() => {
@@ -231,6 +237,11 @@ export default function GrabberApp() {
       }
     }
 
+    // Wait for the WebCodecs probe to settle before sending the request —
+    // otherwise we might send instantMode=false and have the server do work
+    // the client was about to do. First-load auto-fetch (clipboard detect)
+    // regularly beats the probe otherwise.
+    const probed = webCodecsProbe.current ? await webCodecsProbe.current : false
     try {
       const res = await fetch('/api/download', {
         method: 'POST',
@@ -244,7 +255,7 @@ export default function GrabberApp() {
           verticalPad: settings.verticalPad,
           duration: video.duration,
           burnSubtitles: settings.burnSubtitles,
-          instantMode: settings.instantMode && webCodecsSupported,
+          instantMode: settings.instantMode && probed,
         }),
       })
       const data = await res.json()
@@ -1087,7 +1098,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 42</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 43</span>
       </footer>
     </div>
   )
