@@ -28,20 +28,39 @@ export interface ProcessOptions {
 /** Feature-detect WebCodecs video encode + decode support. */
 export async function isWebCodecsSupported(): Promise<boolean> {
   if (typeof VideoEncoder === 'undefined' || typeof VideoDecoder === 'undefined') {
+    console.warn('[webcodecs] VideoEncoder/VideoDecoder not in window')
     return false
   }
+  // Probe multiple H.264 profiles — the mediabunny encoder will pick whichever
+  // one the browser accepts at runtime, so we just need ANY of them to work.
+  // `prefer-hardware` is dropped here because that hint alone can cause some
+  // Chrome versions to report `supported: false` on perfectly capable GPUs.
+  const codecs = ['avc1.640028', 'avc1.4d401e', 'avc1.42E01E', 'avc1.64001f']
   try {
-    const encSupport = await VideoEncoder.isConfigSupported({
-      codec: 'avc1.4d401e',
-      width: 720,
-      height: 1280,
-      framerate: 30,
-      bitrate: 5_000_000,
-      hardwareAcceleration: 'prefer-hardware',
-    })
-    const decSupport = await VideoDecoder.isConfigSupported({ codec: 'avc1.42E01E' })
-    return !!(encSupport.supported && decSupport.supported)
-  } catch {
+    let encodeOk: string | null = null
+    for (const codec of codecs) {
+      try {
+        const res = await VideoEncoder.isConfigSupported({
+          codec, width: 720, height: 1280, framerate: 30, bitrate: 5_000_000,
+        })
+        if (res.supported) { encodeOk = codec; break }
+      } catch {}
+    }
+    let decodeOk: string | null = null
+    for (const codec of codecs) {
+      try {
+        const res = await VideoDecoder.isConfigSupported({ codec })
+        if (res.supported) { decodeOk = codec; break }
+      } catch {}
+    }
+    if (!encodeOk || !decodeOk) {
+      console.warn(`[webcodecs] no H.264 profile worked — encode=${encodeOk} decode=${decodeOk}`)
+      return false
+    }
+    console.log(`[webcodecs] ok: encode=${encodeOk} decode=${decodeOk}`)
+    return true
+  } catch (e: any) {
+    console.warn('[webcodecs] detection threw:', e?.message || e)
     return false
   }
 }
