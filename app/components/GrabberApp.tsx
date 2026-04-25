@@ -270,11 +270,31 @@ export default function GrabberApp() {
     setSelectedFormats({})
     autoTriggered.current = false
 
+    const log = (msg: string) => setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] ${msg}`])
+    const target = apiBase() || 'droplet'
+    const trimmedUrl = videoUrl.trim()
+    log(`fetchInfo: ${trimmedUrl} → ${target}`)
+
+    // Abort if the server hasn't responded in 45s. The droplet's yt-dlp side
+    // has a 30s timeout, so 45s leaves room for network jitter without leaving
+    // the user staring at a spinner forever on a region-blocked URL.
+    const ac = new AbortController()
+    const timeoutId = setTimeout(() => ac.abort(), 45_000)
+
     try {
-      const res = await fetch(`${apiBase()}/api/info?url=${encodeURIComponent(videoUrl.trim())}`, { headers: apiHeaders(false) })
+      const res = await fetch(`${apiBase()}/api/info?url=${encodeURIComponent(trimmedUrl)}`, {
+        headers: apiHeaders(false),
+        signal: ac.signal,
+      })
+      log(`fetchInfo: HTTP ${res.status}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to fetch')
       const vids: VideoInfo[] = data.videos || (data.id ? [data] : [])
+      if (vids.length === 0) {
+        log('fetchInfo: server returned 0 videos — likely region-blocked or extractor failed')
+        throw new Error('No videos returned (region-blocked, private, or extractor failed)')
+      }
+      log(`fetchInfo: ${vids.length} video(s) returned`)
       setVideos(vids)
       // Set default format for each video
       const defaults: Record<string, string> = {}
@@ -283,8 +303,13 @@ export default function GrabberApp() {
       }
       setSelectedFormats(defaults)
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch video info')
+      const msg = err?.name === 'AbortError'
+        ? 'Timed out after 45s — server probably stuck on this URL'
+        : err.message || 'Failed to fetch video info'
+      log(`fetchInfo: error — ${msg}`)
+      setError(msg)
     } finally {
+      clearTimeout(timeoutId)
       setLoading(false)
     }
     // Deps: apiBase/apiHeaders close over desktopTunnelUrl and
