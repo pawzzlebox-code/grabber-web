@@ -727,15 +727,23 @@ export default function GrabberApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Header */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-[#1a1a1a]">
+      {/* Header — three-column grid so the Build tag stays dead-center even
+          when the title or settings icon change width. Build moved up here
+          from the footer because iPhone's home indicator was getting in the
+          way of tapping it for the debug panel. */}
+      <header className="grid grid-cols-3 items-center px-4 py-3 border-b border-[#1a1a1a]">
         <div className="flex items-center gap-2">
           <Download size={20} className="text-sky-500" />
           <h1 className="text-base font-semibold">Grabber</h1>
         </div>
+        <div className="text-center">
+          <span onClick={() => setShowDebug(s => !s)} className="text-[10px] text-neutral-700 cursor-pointer hover:text-neutral-400 transition-colors px-3 py-1">
+            Build 48
+          </span>
+        </div>
         <button
           onClick={() => setShowSettings(!showSettings)}
-          className="p-2 rounded-lg hover:bg-[#1a1a1a] text-neutral-400 hover:text-white transition-colors"
+          className="p-2 rounded-lg hover:bg-[#1a1a1a] text-neutral-400 hover:text-white transition-colors justify-self-end"
         >
           <Settings size={18} />
         </button>
@@ -1204,10 +1212,6 @@ export default function GrabberApp() {
         </div>
       )}
 
-      {/* Footer */}
-      <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 48</span>
-      </footer>
     </div>
   )
 }
