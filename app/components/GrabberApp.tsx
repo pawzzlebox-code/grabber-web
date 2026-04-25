@@ -1228,13 +1228,14 @@ export default function GrabberApp() {
       </main>
 
       {/* Debug panel */}
-      {showDebug && debugLogs.length > 0 && (
+      {showDebug && (
         <div className="border-t border-[#1a1a1a] bg-[#0a0a0a] px-4 py-2 max-h-48 overflow-y-auto">
           <div className="flex items-center justify-between mb-1">
             <span className="text-[10px] text-neutral-500 uppercase font-mono">Debug Log</span>
             <button onClick={() => setDebugLogs([])} className="text-[10px] text-neutral-600 hover:text-neutral-400">Clear</button>
           </div>
           <pre className="text-[10px] text-green-400 font-mono whitespace-pre-wrap break-all">
+            {debugLogs.length === 0 ? 'No logs yet — start a download to see polling + worker output.' : ''}
             {debugLogs.join('\n')}
           </pre>
         </div>
