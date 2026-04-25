@@ -930,6 +930,25 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     job.eta = ''
     let lastError = ''
 
+    // Stall detector: if no progress event fires within 90s, the stream
+    // fetch is almost certainly being throttled/RSTed by YouTube/CDN.
+    // Kill the worker and surface a clear error rather than letting the
+    // user stare at "Extracting..." indefinitely.
+    let lastProgressAt = Date.now()
+    const STALL_TIMEOUT_MS = 90 * 1000
+    let cancelFnLocal: (() => void) | null = null
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastProgressAt > STALL_TIMEOUT_MS && job.status === 'downloading') {
+        clearInterval(stallTimer)
+        if (cancelFnLocal) {
+          try { cancelFnLocal() } catch {}
+        }
+        job.status = 'error'
+        job.error = 'Stream stalled (90s no progress) — datacenter IP likely blocked. Turn off Skip Desktop or try a different video.'
+        notify(job, { type: 'error', message: job.error })
+      }
+    }, 10_000)
+
     const cancelFn = dispatchDownload(
       {
         job_id: id,
@@ -947,6 +966,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           notify(job, { type: 'status', message })
         },
         onProgress: (p) => {
+          lastProgressAt = Date.now()
           job.percent = p.percent
           job.speed = formatSpeed(p.speed_bps)
           job.eta = formatEta(p.eta)
@@ -960,6 +980,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           })
         },
         onDone: (filepath) => {
+          clearInterval(stallTimer)
           job.cancel = undefined
           if (!filepath) {
             job.status = 'error'
@@ -1010,6 +1031,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           }
         },
         onError: (message, traceback) => {
+          clearInterval(stallTimer)
           job.cancel = undefined
           lastError = message
           if (traceback) console.error('[ytdlp-pool trace]', traceback)
@@ -1026,6 +1048,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         },
       },
     )
+    cancelFnLocal = cancelFn
     job.cancel = cancelFn
   }
 
