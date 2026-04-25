@@ -988,6 +988,19 @@ export function startDownload(id: string, url: string, formatId?: string, title?
             notify(job, { type: 'error', message: job.error })
             return
           }
+          // Reject suspiciously small outputs — yt-dlp sometimes writes a
+          // YouTube error page or a partial-RST stub and reports success.
+          // Anything under 1 KB is not a real video.
+          try {
+            const sz = fs.statSync(filepath).size
+            if (sz < 1024) {
+              try { fs.unlinkSync(filepath) } catch {}
+              job.status = 'error'
+              job.error = `Server returned a ${sz}-byte file — likely blocked or RSTed mid-stream. Try without Skip Desktop.`
+              notify(job, { type: 'error', message: job.error })
+              return
+            }
+          } catch {}
           job.filePath = filepath
           job.fileName = path.basename(filepath)
 

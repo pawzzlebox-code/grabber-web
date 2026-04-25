@@ -480,7 +480,7 @@ export default function GrabberApp() {
       let blob: Blob
       if (total && res.body) {
         const reader = res.body.getReader()
-        const chunks: Uint8Array[] = []
+        const chunks: BlobPart[] = []
         let received = 0
         while (true) {
           const { done, value } = await reader.read()
@@ -489,13 +489,21 @@ export default function GrabberApp() {
           received += value.length
           setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
         }
-        const combined = new Uint8Array(received)
-        let offset = 0
-        for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length }
-        blob = new Blob([combined])
+        // Hand the chunks straight to Blob — no manual concat. Saves a 2nd
+        // full-size copy in memory; iOS Safari OOM-kills the tab around
+        // ~250 MB peak, which a 100 MB video could hit with double-buffering.
+        blob = new Blob(chunks, { type: 'video/mp4' })
       } else {
         setSaveProgress(prev => ({ ...prev, [id]: -1 }))
         blob = await res.blob()
+      }
+
+      // Reject suspiciously small files — server-side guard already rejects
+      // < 1 KB but defend in depth in case it slips through.
+      if (blob.size < 1024) {
+        setError(`Got a ${blob.size}-byte file — server likely returned a stream error. Try again or turn off Skip Desktop.`)
+        setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+        return
       }
 
       const ext = name.split('.').pop()?.toLowerCase()
@@ -529,7 +537,7 @@ export default function GrabberApp() {
       let rawBlob: Blob
       if (total && res.body) {
         const reader = res.body.getReader()
-        const chunks: Uint8Array[] = []
+        const chunks: BlobPart[] = []
         let received = 0
         while (true) {
           const { done, value } = await reader.read()
@@ -538,15 +546,19 @@ export default function GrabberApp() {
           received += value.length
           setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
         }
-        const combined = new Uint8Array(received)
-        let offset = 0
-        for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.length }
-        rawBlob = new Blob([combined], { type: 'video/mp4' })
+        // Skip manual concat — see prefetchFile for the iOS Safari OOM rationale.
+        rawBlob = new Blob(chunks, { type: 'video/mp4' })
       } else {
         setSaveProgress(prev => ({ ...prev, [id]: -1 }))
         rawBlob = await res.blob()
       }
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+
+      // Same tiny-file guard as prefetchFile — bail before WebCodecs decodes garbage.
+      if (rawBlob.size < 1024) {
+        setError(`Got a ${rawBlob.size}-byte file — server likely returned a stream error. Try again or turn off Skip Desktop.`)
+        return
+      }
 
       // Step 2: WebCodecs worker — local pad + burn subs
       setInstantProgress(prev => ({ ...prev, [id]: { pct: 0, stage: 'Starting device encoder...' } }))
