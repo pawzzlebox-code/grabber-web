@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+Long-running yt-dlp worker. Imports yt_dlp once at boot and then handles
+JSON commands over stdin/stdout. Eliminates the ~500-1000ms Python
+interpreter + extractor-load cost on each download.
+
+Protocol (JSON per line):
+  in:  {"type":"download","job_id":"...","url":"...","format":"...",
+         "outtmpl":"...","proxy":"...","cookies":"...",
+         "playlist_items":"...","no_playlist":true}
+  in:  {"type":"ping"}
+  out: {"type":"ready"}                                         # on boot
+  out: {"type":"status","job_id":"...","message":"..."}
+  out: {"type":"progress","job_id":"...","percent":12.5,
+        "speed_bps":5242880,"eta":30,"total_bytes":123456}
+  out: {"type":"done","job_id":"...","filepath":"/tmp/..."}
+  out: {"type":"error","job_id":"...","message":"..."}
+  out: {"type":"pong"}
+"""
+import sys
+import os
+import json
+import traceback
+
+# Force UTF-8 to match the previous CLI env vars
+os.environ.setdefault('PYTHONUTF8', '1')
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
+from yt_dlp import YoutubeDL
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + '\n')
+    sys.stdout.flush()
+
+
+class JobContext:
+    def __init__(self, job_id):
+        self.job_id = job_id
+        self.final_filepath = None
+
+
+def make_progress_hook(ctx):
+    def hook(d):
+        status = d.get('status')
+        if status == 'downloading':
+            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+            downloaded = d.get('downloaded_bytes') or 0
+            percent = (downloaded / total * 100) if total else 0
+            emit({
+                'type': 'progress',
+                'job_id': ctx.job_id,
+                'percent': round(percent, 2),
+                'speed_bps': d.get('speed') or 0,
+                'eta': d.get('eta') or 0,
+                'total_bytes': total,
+                'downloaded_bytes': downloaded,
+            })
+        elif status == 'finished':
+            # Download done, may still have post-processing (merge, fixup)
+            emit({
+                'type': 'status',
+                'job_id': ctx.job_id,
+                'message': 'Merging...',
+            })
+        elif status == 'error':
+            emit({
+                'type': 'status',
+                'job_id': ctx.job_id,
+                'message': 'Download error',
+            })
+    return hook
+
+
+def make_post_hook(ctx):
+    def hook(filename):
+        # post_hooks fires after all post-processors finish. The argument is
+        # the final filepath of the moved file.
+        ctx.final_filepath = filename
+    return hook
+
+
+def run_download(cmd):
+    ctx = JobContext(cmd['job_id'])
+    opts = {
+        'outtmpl': {'default': cmd['outtmpl']},
+        'format': cmd.get('format') or 'bestvideo*+bestaudio/best',
+        'noplaylist': cmd.get('no_playlist', True),
+        'check_formats': False,
+        'updatetime': False,
+        'concurrent_fragment_downloads': 8,
+        'http_chunk_size': 10 * 1024 * 1024,
+        'retries': 3,
+        'fragment_retries': 5,
+        'quiet': True,
+        'no_warnings': False,
+        'progress_hooks': [make_progress_hook(ctx)],
+        'post_hooks': [make_post_hook(ctx)],
+    }
+    if cmd.get('playlist_items'):
+        opts['playlist_items'] = str(cmd['playlist_items'])
+    if cmd.get('proxy'):
+        opts['proxy'] = cmd['proxy']
+    if cmd.get('cookies'):
+        opts['cookiefile'] = cmd['cookies']
+
+    emit({'type': 'status', 'job_id': ctx.job_id, 'message': 'Extracting...'})
+
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(cmd['url'], download=True)
+        # Prefer the post_hook-captured path (post-merge); fall back to
+        # requested_downloads or prepare_filename.
+        filepath = ctx.final_filepath
+        if not filepath:
+            requested = (info or {}).get('requested_downloads') or []
+            if requested:
+                filepath = requested[0].get('filepath') or requested[0].get('_filename')
+        if not filepath and info:
+            filepath = ydl.prepare_filename(info)
+        emit({'type': 'done', 'job_id': ctx.job_id, 'filepath': filepath or ''})
+
+
+def main():
+    emit({'type': 'ready'})
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            cmd = json.loads(line)
+        except Exception as e:
+            emit({'type': 'error', 'job_id': None, 'message': f'bad json: {e}'})
+            continue
+        ctype = cmd.get('type')
+        if ctype == 'download':
+            try:
+                run_download(cmd)
+            except Exception as e:
+                emit({
+                    'type': 'error',
+                    'job_id': cmd.get('job_id'),
+                    'message': str(e),
+                    'traceback': traceback.format_exc(),
+                })
+        elif ctype == 'ping':
+            emit({'type': 'pong'})
+        else:
+            emit({'type': 'error', 'job_id': cmd.get('job_id'), 'message': f'unknown type: {ctype}'})
+
+
+if __name__ == '__main__':
+    main()
