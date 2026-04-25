@@ -116,6 +116,31 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000)
 
+// Disk-based orphan sweeper. The in-memory sweeper above only knows about
+// jobs in the current process's `downloads` Map — pm2 restarts wipe it,
+// leaving any in-flight files as permanent orphans. This walks TEMP_DIR
+// every 10 min and deletes files older than 60 min regardless of Map
+// state, preserving cookies.txt and any in-progress downloads.
+const ORPHAN_MAX_AGE_MS = 60 * 60 * 1000
+setInterval(() => {
+  if (!fs.existsSync(TEMP_DIR)) return
+  let entries: string[]
+  try { entries = fs.readdirSync(TEMP_DIR) } catch { return }
+  const now = Date.now()
+  for (const name of entries) {
+    if (name === 'cookies.txt') continue
+    const full = path.join(TEMP_DIR, name)
+    let stat: fs.Stats
+    try { stat = fs.statSync(full) } catch { continue }
+    if (!stat.isFile()) continue
+    if (now - stat.mtimeMs < ORPHAN_MAX_AGE_MS) continue
+    try {
+      fs.unlinkSync(full)
+      console.log(`[orphan-sweeper] deleted ${name} (age ${Math.round((now - stat.mtimeMs) / 60000)}min)`)
+    } catch {}
+  }
+}, 10 * 60 * 1000)
+
 export function getDownload(id: string): DownloadJob | undefined {
   return downloads.get(id)
 }
