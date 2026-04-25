@@ -39,7 +39,7 @@ interface DownloadJob {
 // the user has a desktopKey saved; else WebCodecs if the browser supports
 // it; else server-side. desktopKey moves to "Advanced" since most users
 // won't configure it, and direct download joins it there.
-const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '' }
+const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '', skipDesktop: false }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -161,13 +161,19 @@ export default function GrabberApp() {
   // All API calls route through this. Returns the desktop tunnel URL when
   // both a tunnel is registered AND the user has saved a desktop key (the
   // implicit "I want to use my desktop" signal). Otherwise '' = same-origin.
-  const apiBase = () => (desktopTunnelUrl && settings.desktopKey) ? desktopTunnelUrl : ''
+  // skipDesktop forces the same-origin path even when the desktop is up — a
+  // per-session escape hatch for "just download it on my phone, don't bounce
+  // through the PC."
+  const apiBase = () =>
+    (!settings.skipDesktop && desktopTunnelUrl && settings.desktopKey)
+      ? desktopTunnelUrl
+      : ''
 
   // Desktop endpoints require the cookie key for auth; droplet doesn't care.
   const apiHeaders = (json: boolean): Record<string, string> => {
     const h: Record<string, string> = {}
     if (json) h['Content-Type'] = 'application/json'
-    if (desktopTunnelUrl && settings.desktopKey) {
+    if (!settings.skipDesktop && desktopTunnelUrl && settings.desktopKey) {
       h['x-cookie-key'] = settings.desktopKey
     }
     return h
@@ -177,6 +183,7 @@ export default function GrabberApp() {
   // a desktopKey saved (implying "I want my desktop") but the tunnel isn't
   // up, prompt them once per session: continue on-device, or cancel.
   const ensureProcessingPath = async (): Promise<boolean> => {
+    if (settings.skipDesktop) return true // user explicitly opted out for this session
     const wantsDesktop = !!settings.desktopKey
     const desktopUp = !!desktopTunnelUrl
     if (!wantsDesktop) return true       // user never configured desktop, no expectation
@@ -398,7 +405,7 @@ export default function GrabberApp() {
             donePrefetched = true
             // Mirror the client-side auto-pick from the request: instant mode
             // only when desktop isn't being used + WebCodecs is supported.
-            const usingDesktop = !!(desktopTunnelUrl && settings.desktopKey)
+            const usingDesktop = !settings.skipDesktop && !!(desktopTunnelUrl && settings.desktopKey)
             const useInstant = !usingDesktop && webCodecsSupported && (settings.burnSubtitles || settings.verticalPad)
             if (useInstant) {
               // Instant mode: fetch raw video, process on-device with WebCodecs.
@@ -809,13 +816,34 @@ export default function GrabberApp() {
             </label>
           </div>
 
+          {/* Skip-desktop override. Greyed out until a desktopKey is set —
+              if no desktop is configured there's nothing to skip. */}
+          <div className={`flex items-center justify-between ${!settings.desktopKey ? 'opacity-40' : ''}`}>
+            <div>
+              <p className="text-sm text-white">Skip desktop</p>
+              <p className="text-[11px] text-neutral-500">Bypass your PC for this session — process on phone/server instead</p>
+            </div>
+            <label className={`relative inline-flex ${settings.desktopKey ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
+              <input
+                type="checkbox"
+                disabled={!settings.desktopKey}
+                checked={settings.skipDesktop}
+                onChange={(e) => setSettings(s => ({ ...s, skipDesktop: e.target.checked }))}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-slate-400 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+            </label>
+          </div>
+
           {/* Live status of where this download will run */}
           <div className="text-[10px] text-neutral-600 pt-1 border-t border-[#1a1a1a]">
-            {desktopTunnelUrl && settings.desktopKey
-              ? <>Routing through your desktop (NVENC) — <span className="text-emerald-500">{new URL(desktopTunnelUrl).hostname}</span></>
-              : webCodecsSupported
-                ? 'Processing on this device (WebCodecs)'
-                : 'Processing on the Grabber server'}
+            {settings.skipDesktop && settings.desktopKey
+              ? <>Skipping desktop — {webCodecsSupported ? 'processing on this device (WebCodecs)' : 'processing on the Grabber server'}</>
+              : desktopTunnelUrl && settings.desktopKey
+                ? <>Routing through your desktop (NVENC) — <span className="text-emerald-500">{new URL(desktopTunnelUrl).hostname}</span></>
+                : webCodecsSupported
+                  ? 'Processing on this device (WebCodecs)'
+                  : 'Processing on the Grabber server'}
           </div>
 
           {/* Advanced — collapsed by default */}
