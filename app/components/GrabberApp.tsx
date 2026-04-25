@@ -34,7 +34,12 @@ interface DownloadJob {
 }
 
 // Persist settings in localStorage
-const defaultSettings = { autoDetect: true, autoBest: false, verticalPad: false, directDownload: false, burnSubtitles: false, instantMode: false, useMyDesktop: false, desktopKey: '' }
+// User-visible defaults. instantMode + useMyDesktop are gone — both are
+// auto-selected at runtime: desktop wins if its tunnel is registered AND
+// the user has a desktopKey saved; else WebCodecs if the browser supports
+// it; else server-side. desktopKey moves to "Advanced" since most users
+// won't configure it, and direct download joins it there.
+const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '' }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -107,6 +112,13 @@ export default function GrabberApp() {
   // are routed to the tunnel instead of the droplet. The desktop's local HTTP
   // server exposes the same endpoints, so no other code needs to change.
   const [desktopTunnelUrl, setDesktopTunnelUrl] = useState<string | null>(null)
+  // Once the user agrees to "process on this device" because the desktop
+  // wasn't reachable, don't bug them again until the page reloads.
+  const [acceptedFallback, setAcceptedFallback] = useState(false)
+  // Resolver pattern: when ensureProcessingPath finds desktop missing, it
+  // pops this modal and awaits the user's choice via the resolve callback.
+  const [fallbackModal, setFallbackModal] = useState<{ resolve: (ok: boolean) => void } | null>(null)
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [instantProgress, setInstantProgress] = useState<Record<string, { pct: number; stage: string }>>({})
   // Tracks in-flight download IDs that can be cancelled. Holds AbortControllers + worker handles.
   const cancelHandles = useRef<Record<string, {
@@ -120,12 +132,11 @@ export default function GrabberApp() {
     webCodecsProbe.current.then(setWebCodecsSupported)
   }, [])
 
-  // If "Use my desktop" is on, ask the droplet for the registered tunnel URL.
-  // The desktop app registers asynchronously (cloudflared takes ~10s to boot),
-  // and its URL rotates on every restart. Poll every 20s + refetch on focus
-  // so the UI picks up the current URL without a full page reload.
+  // Always poll for a registered desktop tunnel — auto-route to it whenever
+  // available + the user has the cookie key configured. No toggle needed.
+  // Cloudflared boots ~10s after Share-with-iPhone is enabled, and its URL
+  // rotates on every desktop restart, so refresh every 20s + on focus.
   useEffect(() => {
-    if (!settings.useMyDesktop) { setDesktopTunnelUrl(null); return }
     let cancelled = false
     const fetchUrl = async () => {
       try {
@@ -145,20 +156,33 @@ export default function GrabberApp() {
       clearInterval(interval)
       window.removeEventListener('focus', onFocus)
     }
-  }, [settings.useMyDesktop])
+  }, [])
 
-  // All API calls route through this. Returns '' (same-origin) unless a
-  // desktop tunnel is registered AND the user opted in.
-  const apiBase = () => (settings.useMyDesktop && desktopTunnelUrl) ? desktopTunnelUrl : ''
+  // All API calls route through this. Returns the desktop tunnel URL when
+  // both a tunnel is registered AND the user has saved a desktop key (the
+  // implicit "I want to use my desktop" signal). Otherwise '' = same-origin.
+  const apiBase = () => (desktopTunnelUrl && settings.desktopKey) ? desktopTunnelUrl : ''
 
   // Desktop endpoints require the cookie key for auth; droplet doesn't care.
   const apiHeaders = (json: boolean): Record<string, string> => {
     const h: Record<string, string> = {}
     if (json) h['Content-Type'] = 'application/json'
-    if (settings.useMyDesktop && desktopTunnelUrl && settings.desktopKey) {
+    if (desktopTunnelUrl && settings.desktopKey) {
       h['x-cookie-key'] = settings.desktopKey
     }
     return h
+  }
+
+  // Before any download, decide where it'll be processed. If the user has
+  // a desktopKey saved (implying "I want my desktop") but the tunnel isn't
+  // up, prompt them once per session: continue on-device, or cancel.
+  const ensureProcessingPath = async (): Promise<boolean> => {
+    const wantsDesktop = !!settings.desktopKey
+    const desktopUp = !!desktopTunnelUrl
+    if (!wantsDesktop) return true       // user never configured desktop, no expectation
+    if (desktopUp) return true           // happy path
+    if (acceptedFallback) return true    // already chose on-device this session
+    return new Promise<boolean>((resolve) => setFallbackModal({ resolve }))
   }
 
   useEffect(() => {
@@ -256,11 +280,10 @@ export default function GrabberApp() {
     } finally {
       setLoading(false)
     }
-    // Deps matter: apiBase/apiHeaders close over settings.useMyDesktop,
-    // desktopTunnelUrl, and settings.desktopKey — without these in deps,
-    // the callback keeps using first-render values and routes to the droplet
-    // even after the desktop tunnel is registered.
-  }, [settings.useMyDesktop, desktopTunnelUrl, settings.desktopKey])
+    // Deps: apiBase/apiHeaders close over desktopTunnelUrl and
+    // settings.desktopKey, so they need to be in deps for the callback to
+    // pick up the live values once the tunnel registers.
+  }, [desktopTunnelUrl, settings.desktopKey])
 
   const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string) => {
     // Direct download mode: browser fetches from source URL
@@ -287,11 +310,17 @@ export default function GrabberApp() {
       }
     }
 
-    // Wait for the WebCodecs probe to settle before sending the request —
-    // otherwise we might send instantMode=false and have the server do work
-    // the client was about to do. First-load auto-fetch (clipboard detect)
-    // regularly beats the probe otherwise.
+    // Confirm processing path. If user wants desktop but it's not online,
+    // ensureProcessingPath shows the modal and waits for a decision.
+    const proceed = await ensureProcessingPath()
+    if (!proceed) return
+
+    // Wait for the WebCodecs probe to settle so the auto-pick is correct.
     const probed = webCodecsProbe.current ? await webCodecsProbe.current : false
+    // Auto-pick: instant mode kicks in when desktop ISN'T being used, the
+    // browser supports WebCodecs, and there's actually post-processing to do.
+    const usingDesktop = !!apiBase()
+    const useInstant = !usingDesktop && probed && (settings.burnSubtitles || settings.verticalPad)
     try {
       const res = await fetch(`${apiBase()}/api/download`, {
         method: 'POST',
@@ -305,7 +334,7 @@ export default function GrabberApp() {
           verticalPad: settings.verticalPad,
           duration: video.duration,
           burnSubtitles: settings.burnSubtitles,
-          instantMode: settings.instantMode && probed,
+          instantMode: useInstant,
         }),
       })
       const data = await res.json()
@@ -367,10 +396,12 @@ export default function GrabberApp() {
 
           if (state.status === 'done' && !donePrefetched) {
             donePrefetched = true
-            const useInstant = settings.instantMode && webCodecsSupported && (settings.burnSubtitles || settings.verticalPad)
+            // Mirror the client-side auto-pick from the request: instant mode
+            // only when desktop isn't being used + WebCodecs is supported.
+            const usingDesktop = !!(desktopTunnelUrl && settings.desktopKey)
+            const useInstant = !usingDesktop && webCodecsSupported && (settings.burnSubtitles || settings.verticalPad)
             if (useInstant) {
               // Instant mode: fetch raw video, process on-device with WebCodecs.
-              // Server skips ffmpeg pad AND (if subs off) Groq — client does it all.
               prefetchAndProcess(data.id, state.fileName, state.srt || '', settings.verticalPad, settings.burnSubtitles)
             } else if (typeof navigator !== 'undefined' && 'share' in navigator) {
               prefetchFile(data.id, state.fileName)
@@ -710,21 +741,26 @@ export default function GrabberApp() {
         </button>
       </header>
 
-      {/* Settings panel */}
+      {/* Settings panel — slim 4-toggle default + Advanced disclosure */}
       {showSettings && (
         <div className="border-b border-[#1a1a1a] bg-[#111] px-4 py-3 space-y-3 animate-fade-in">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] uppercase tracking-wider text-neutral-500">Settings</p>
+            <button
+              onClick={() => setSettings(s => ({ ...defaultSettings, desktopKey: s.desktopKey }))}
+              className="text-[10px] uppercase tracking-wider text-neutral-500 hover:text-sky-500 transition-colors"
+            >
+              Reset
+            </button>
+          </div>
+
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-white">Auto-detect clipboard</p>
               <p className="text-[11px] text-neutral-500">Automatically detects video URLs when you copy them</p>
             </div>
             <label className="relative inline-flex cursor-pointer">
-              <input
-                type="checkbox"
-                checked={settings.autoDetect}
-                onChange={(e) => setSettings(s => ({ ...s, autoDetect: e.target.checked }))}
-                className="sr-only peer"
-              />
+              <input type="checkbox" checked={settings.autoDetect} onChange={(e) => setSettings(s => ({ ...s, autoDetect: e.target.checked }))} className="sr-only peer" />
               <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-sky-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
@@ -738,12 +774,7 @@ export default function GrabberApp() {
               <p className="text-[11px] text-neutral-500">Instantly downloads best quality when URL is detected</p>
             </div>
             <label className="relative inline-flex cursor-pointer">
-              <input
-                type="checkbox"
-                checked={settings.autoBest}
-                onChange={(e) => setSettings(s => ({ ...s, autoBest: e.target.checked }))}
-                className="sr-only peer"
-              />
+              <input type="checkbox" checked={settings.autoBest} onChange={(e) => setSettings(s => ({ ...s, autoBest: e.target.checked }))} className="sr-only peer" />
               <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-sky-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
@@ -754,101 +785,97 @@ export default function GrabberApp() {
               <p className="text-[11px] text-neutral-500">Adds black bars for Reels/TikTok</p>
             </div>
             <label className="relative inline-flex cursor-pointer">
-              <input
-                type="checkbox"
-                checked={settings.verticalPad}
-                onChange={(e) => setSettings(s => ({ ...s, verticalPad: e.target.checked }))}
-                className="sr-only peer"
-              />
+              <input type="checkbox" checked={settings.verticalPad} onChange={(e) => setSettings(s => ({ ...s, verticalPad: e.target.checked }))} className="sr-only peer" />
               <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-purple-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-white">Direct download</p>
-              <p className="text-[11px] text-neutral-500">Faster, skips server. Won't work for geo-blocked sites</p>
-            </div>
-            <label className="relative inline-flex cursor-pointer">
-              <input
-                type="checkbox"
-                checked={settings.directDownload}
-                onChange={(e) => setSettings(s => ({ ...s, directDownload: e.target.checked }))}
-                className="sr-only peer"
-              />
-              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-orange-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
-            </label>
-          </div>
-
-          <div className="flex items-center justify-between">
-            <div>
               <p className="text-sm text-white">Burn English subtitles</p>
-              <p className="text-[11px] text-neutral-500">Auto-generates English subtitles and burns them into the video (any language to English)</p>
+              <p className="text-[11px] text-neutral-500">Auto-translates and burns subtitles into the video</p>
             </div>
             <label className="relative inline-flex cursor-pointer">
-              <input
-                type="checkbox"
-                checked={settings.burnSubtitles}
-                onChange={(e) => setSettings(s => ({ ...s, burnSubtitles: e.target.checked }))}
-                className="sr-only peer"
-              />
+              <input type="checkbox" checked={settings.burnSubtitles} onChange={(e) => setSettings(s => ({ ...s, burnSubtitles: e.target.checked }))} className="sr-only peer" />
               <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-yellow-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
-          {webCodecsSupported && (
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-white">⚡ Instant mode (WebCodecs)</p>
-                <p className="text-[11px] text-neutral-500">Process on your device's hardware encoder — ~5s on iPhone. Works only with subtitles on.</p>
-              </div>
-              <label className="relative inline-flex cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={settings.instantMode}
-                  onChange={(e) => setSettings(s => ({ ...s, instantMode: e.target.checked }))}
-                  className="sr-only peer"
-                />
-                <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-cyan-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
-              </label>
-            </div>
-          )}
+          {/* Live status of where this download will run */}
+          <div className="text-[10px] text-neutral-600 pt-1 border-t border-[#1a1a1a]">
+            {desktopTunnelUrl && settings.desktopKey
+              ? <>Routing through your desktop (NVENC) — <span className="text-emerald-500">{new URL(desktopTunnelUrl).hostname}</span></>
+              : webCodecsSupported
+                ? 'Processing on this device (WebCodecs)'
+                : 'Processing on the Grabber server'}
+          </div>
 
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-white">🖥️ Use my desktop (fastest)</p>
-              <p className="text-[11px] text-neutral-500">
-                {desktopTunnelUrl
-                  ? `Routing through your desktop — ${new URL(desktopTunnelUrl).hostname}`
-                  : settings.useMyDesktop
-                    ? 'No desktop registered. Start the Grabber desktop app with this cookie key.'
-                    : 'Routes downloads through your home PC (NVENC, no server bottleneck)'}
+          {/* Advanced — collapsed by default */}
+          <button
+            onClick={() => setShowAdvanced(s => !s)}
+            className="text-[11px] text-neutral-500 hover:text-white transition-colors"
+          >
+            {showAdvanced ? '▾ Advanced' : '▸ Advanced'}
+          </button>
+
+          {showAdvanced && (
+            <div className="space-y-3 pl-2 border-l border-[#262626]">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-white">Direct download</p>
+                  <p className="text-[11px] text-neutral-500">Skips server entirely (Grabber Helper extension only)</p>
+                </div>
+                <label className="relative inline-flex cursor-pointer">
+                  <input type="checkbox" checked={settings.directDownload} onChange={(e) => setSettings(s => ({ ...s, directDownload: e.target.checked }))} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-orange-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+                </label>
+              </div>
+
+              <div>
+                <p className="text-sm text-white">Desktop cookie key</p>
+                <p className="text-[11px] text-neutral-500 mb-1">Routes downloads through your PC's NVENC if set + the desktop app is online</p>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Optional"
+                  value={settings.desktopKey}
+                  onChange={(e) => setSettings(s => ({ ...s, desktopKey: e.target.value }))}
+                  style={{ WebkitTextSecurity: 'disc' } as any}
+                  className="w-full px-3 py-2 text-xs bg-[#0f0f0f] border border-[#262626] rounded-md text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500 font-mono"
+                />
+              </div>
+
+              <p className="text-[10px] text-neutral-600">
+                Install the Grabber Helper Chrome extension for YouTube cookie sync
               </p>
             </div>
-            <label className="relative inline-flex cursor-pointer">
-              <input
-                type="checkbox"
-                checked={settings.useMyDesktop}
-                onChange={(e) => setSettings(s => ({ ...s, useMyDesktop: e.target.checked }))}
-                className="sr-only peer"
-              />
-              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-emerald-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
-            </label>
-          </div>
-          {settings.useMyDesktop && (
-            <input
-              type="password"
-              placeholder="Desktop cookie key"
-              value={settings.desktopKey}
-              onChange={(e) => setSettings(s => ({ ...s, desktopKey: e.target.value }))}
-              className="w-full mt-1 px-3 py-2 text-xs bg-[#111] border border-[#2a2a2a] rounded-md text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
-            />
           )}
+        </div>
+      )}
 
-          <div className="pt-1">
-            <p className="text-[10px] text-neutral-600">
-              Install the Grabber Helper Chrome extension for YouTube support
+      {/* Modal: desktop key set but tunnel offline */}
+      {fallbackModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className="bg-[#1a1a1a] rounded-xl p-5 max-w-sm w-full space-y-3 border border-[#262626]">
+            <h3 className="text-base text-white font-semibold">Desktop not online</h3>
+            <p className="text-sm text-neutral-400">
+              Your PC's Grabber app isn't reachable. Continue and process on this device instead?
             </p>
+            <div className="flex gap-2 justify-end pt-2">
+              <button
+                onClick={() => { fallbackModal.resolve(false); setFallbackModal(null) }}
+                className="px-4 py-2 text-sm rounded-lg bg-[#262626] hover:bg-[#333] text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setAcceptedFallback(true); fallbackModal.resolve(true); setFallbackModal(null) }}
+                className="px-4 py-2 text-sm rounded-lg bg-sky-500 hover:bg-sky-400 text-white transition-colors"
+              >
+                Continue
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1179,7 +1206,7 @@ export default function GrabberApp() {
 
       {/* Footer */}
       <footer className="text-center py-3 text-[10px] text-neutral-700 border-t border-[#1a1a1a]">
-        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 47</span>
+        <span onClick={() => setShowDebug(s => !s)} className="cursor-pointer">Build 48</span>
       </footer>
     </div>
   )
