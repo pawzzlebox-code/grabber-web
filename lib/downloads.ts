@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
+import { dispatchDownload } from './ytdlp-pool'
 
 export interface VideoInfo {
   id: string
@@ -29,6 +30,7 @@ export interface DownloadJob {
   listeners: Set<(data: any) => void>
   createdAt: number
   process?: ChildProcess
+  cancel?: () => void
   duration?: number
   logs: string[]
   srt?: string
@@ -298,6 +300,102 @@ function extractError(stderr: string, code: number | null): string {
 // ffmpeg mutex — only one ffmpeg job runs at a time to avoid OOM on small droplet
 const ffmpegQueue: Array<() => void> = []
 let ffmpegRunning = false
+
+// Read just stream-0 codec name. Used to detect VP9 / AV1 sources that
+// iOS Photos refuses to import even when wrapped in MP4.
+function probeVideoCodec(filePath: string): Promise<string> {
+  return new Promise((resolve) => {
+    const proc = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name',
+      '-of', 'csv=p=0',
+      filePath,
+    ])
+    let out = ''
+    proc.stdout.on('data', (d: Buffer) => { out += d.toString() })
+    proc.on('close', () => resolve(out.trim().toLowerCase()))
+    proc.on('error', () => resolve(''))
+  })
+}
+
+// If the downloaded video is anything other than H.264 / HEVC, re-encode
+// to H.264 so iOS Photos accepts it. No pad / no subs — pure codec-only
+// transcode. Mirrors webserver.ts on the desktop side; only matters when
+// neither pad nor subs already ran (those paths produce H.264 via libx264).
+async function transcodeIfNotIosCompat(job: DownloadJob, onComplete: () => void): Promise<void> {
+  const inputPath = job.filePath!
+
+  function log(msg: string) {
+    console.log('[transcode]', msg)
+    notify(job, { type: 'log', message: msg })
+  }
+
+  const codec = await probeVideoCodec(inputPath)
+  if (codec === 'h264' || codec === 'hevc') {
+    log(`source codec=${codec} — iOS-compatible, skipping transcode`)
+    onComplete()
+    return
+  }
+  log(`source codec=${codec || 'unknown'} — transcoding to H.264 for iOS Photos`)
+
+  await acquireFfmpegSlot()
+  const finish = () => { releaseFfmpegSlot(); onComplete() }
+
+  const outputPath = inputPath.replace(/\.[^.]+$/, '_h264.mp4')
+  const args = [
+    '-i', inputPath,
+    '-c:v', 'libx264', '-preset', 'superfast', '-crf', '22',
+    '-tune', 'fastdecode',
+    '-threads', '0',
+    '-pix_fmt', 'yuv420p',
+    '-profile:v', 'main', '-level', '4.0',
+    '-c:a', 'copy',
+    '-movflags', '+faststart',
+    '-y',
+    '-progress', 'pipe:1',
+    outputPath,
+  ]
+  log(`Command: ffmpeg ${args.join(' ')}`)
+
+  job.status = 'converting'
+  job.percent = 0
+  notify(job, { type: 'converting', percent: 0 })
+
+  const proc = spawn('ffmpeg', args)
+  job.process = proc
+
+  proc.stdout.on('data', (data: Buffer) => {
+    const text = data.toString()
+    const m = text.match(/out_time_ms=(\d+)/)
+    if (m && job.duration && job.duration > 0) {
+      const sec = parseInt(m[1]) / 1_000_000
+      job.percent = Math.min(99, Math.round((sec / job.duration) * 100))
+      notify(job, { type: 'converting', percent: job.percent })
+    }
+  })
+  let stderrBuf = ''
+  proc.stderr.on('data', (d: Buffer) => { stderrBuf += d.toString() })
+  proc.on('error', (err) => {
+    log(`ffmpeg spawn error: ${err.message}`)
+    job.process = undefined
+    finish()
+  })
+  proc.on('close', (code) => {
+    job.process = undefined
+    const outExists = fs.existsSync(outputPath)
+    log(`ffmpeg exit ${code}, output exists: ${outExists}`)
+    if (code === 0 && outExists) {
+      try { fs.unlinkSync(inputPath) } catch {}
+      job.filePath = outputPath
+      job.fileName = path.basename(outputPath)
+    } else {
+      log(`STDERR: ${stderrBuf.slice(-500)}`)
+      try { if (outExists) fs.unlinkSync(outputPath) } catch {}
+    }
+    finish()
+  })
+}
 
 function acquireFfmpegSlot(): Promise<void> {
   return new Promise((resolve) => {
@@ -788,146 +886,147 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   downloads.set(id, job)
 
   const twitter = isTwitterUrl(url)
-  const baseArgs = [
-    '--newline',
-    '--encoding', 'utf-8',
-    '--no-mtime',
-    '--no-check-formats',
-    '--concurrent-fragments', '8',
-    '-N', '4',
-    '--http-chunk-size', '10M',
-    '--retries', '3',
-    '--fragment-retries', '5',
-    ...proxyArgs(url),
-    ...cookieArgs(),
-    '-o', path.join(TEMP_DIR, `${id}_%(title).80B.%(ext)s`),
-    '--print', 'after_move:filepath',
-  ]
-
-  if (!twitter) {
-    baseArgs.push('--no-playlist')
-  } else if (playlistIndex !== undefined) {
-    baseArgs.push('--playlist-items', String(playlistIndex))
-  }
-
   const defaultFmt = twitter ? 'b' : 'bestvideo*+bestaudio/best'
-  baseArgs.push('-f', formatId || defaultFmt)
-  baseArgs.push(url)
+
+  // Instant-feel status set the moment the job is created, before the warm
+  // worker even wakes up. User sees "Contacting host.com..." within ~0ms.
+  let hostname = ''
+  try { hostname = new URL(url).hostname.replace(/^www\./, '') } catch {}
+  job.speed = hostname ? `Contacting ${hostname}...` : 'Starting...'
+  notify(job, { type: 'status', message: job.speed })
+
+  const proxy = process.env.PROXY_URL
+    && !(hostname && ['twitter.com', 'x.com', 't.co', 'instagram.com'].includes(hostname))
+    ? process.env.PROXY_URL : undefined
+  const cookies = fs.existsSync(COOKIE_FILE) ? COOKIE_FILE : undefined
 
   function attemptDownload(attempt: number) {
-    const proc = spawn('yt-dlp', baseArgs, {
-      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
-    })
-
-    job.process = proc
     job.percent = 0
-    job.speed = 'Initializing...'
     job.eta = ''
-    notify(job, { type: 'status', message: 'Initializing...' })
-    let lastLine = ''
-    let stderrOutput = ''
+    let lastError = ''
 
-    proc.stdout.on('data', (data: Buffer) => {
-      const text = data.toString('utf-8')
-      for (const line of text.split('\n')) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        lastLine = trimmed
-
-        const progressMatch = trimmed.match(/\[download\]\s+([\d.]+)%\s+of\s+~?([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+(\S+)/)
-        if (progressMatch) {
-          job.percent = parseFloat(progressMatch[1])
-          job.totalSize = progressMatch[2]
-          job.speed = progressMatch[3]
-          job.eta = progressMatch[4]
-          notify(job, { type: 'progress', percent: job.percent, totalSize: job.totalSize, speed: job.speed, eta: job.eta })
-          continue
-        }
-
-        // Status messages from yt-dlp — shown before download starts
-        let statusMsg = ''
-        if (/\[info\].*Downloading webpage/i.test(trimmed)) statusMsg = 'Fetching webpage...'
-        else if (/\[info\].*Downloading player/i.test(trimmed)) statusMsg = 'Loading player...'
-        else if (/\[info\].*Downloading.*API/i.test(trimmed)) statusMsg = 'Querying API...'
-        else if (/\[info\].*Downloading.*manifest/i.test(trimmed)) statusMsg = 'Loading manifest...'
-        else if (/\[info\].*Downloading.*m3u8/i.test(trimmed)) statusMsg = 'Loading HLS stream...'
-        else if (/\[info\].*Downloading.*JSON/i.test(trimmed)) statusMsg = 'Fetching metadata...'
-        else if (/\[hlsnative\]/i.test(trimmed)) statusMsg = 'Preparing HLS download...'
-        else if (/\[download\].*Destination/i.test(trimmed)) statusMsg = 'Starting download...'
-        else if (/\[download\].*has already been downloaded/i.test(trimmed)) statusMsg = 'Finalizing...'
-        else if (/\[Merger\]/i.test(trimmed)) statusMsg = 'Merging video + audio...'
-        else if (/\[ExtractAudio\]/i.test(trimmed)) statusMsg = 'Extracting audio...'
-        else if (/\[FixupM3u8\]/i.test(trimmed)) statusMsg = 'Fixing stream...'
-
-        if (statusMsg) {
-          job.speed = statusMsg
-          notify(job, { type: 'status', message: statusMsg })
-        }
-      }
-    })
-
-    proc.stderr.on('data', (data: Buffer) => {
-      const text = data.toString('utf-8').trim()
-      stderrOutput += text + '\n'
-      console.error('[yt-dlp]', text)
-    })
-
-    proc.on('close', (code) => {
-      job.process = undefined
-      if (code === 0 && lastLine && !lastLine.startsWith('[')) {
-        job.filePath = lastLine.trim()
-        job.fileName = path.basename(job.filePath)
-
-        const isVideo = formatId !== 'ba'
-
-        const runDone = () => {
-          job.status = 'done'
-          job.percent = 100
-          notify(job, { type: 'done', fileName: job.fileName! })
-        }
-
-        // Instant mode: client does ALL re-encoding (pad, subtitle burn, both).
-        // Server only runs Groq when subtitles are requested — otherwise hand
-        // over the raw downloaded file untouched. Skipping ffmpeg on the $4
-        // droplet makes pad-only flows ~10× faster than the server path.
-        if (instantMode && isVideo) {
-          if (burnSubtitles) {
-            generateSubtitlesOnly(job, runDone)
-          } else {
-            runDone()
+    const cancelFn = dispatchDownload(
+      {
+        job_id: id,
+        url,
+        format: formatId || defaultFmt,
+        outtmpl: path.join(TEMP_DIR, `${id}_%(title).80B.%(ext)s`),
+        proxy,
+        cookies,
+        playlist_items: (!twitter || playlistIndex === undefined) ? undefined : playlistIndex,
+        no_playlist: !twitter,
+      },
+      {
+        onStatus: (message) => {
+          job.speed = message
+          notify(job, { type: 'status', message })
+        },
+        onProgress: (p) => {
+          job.percent = p.percent
+          job.speed = formatSpeed(p.speed_bps)
+          job.eta = formatEta(p.eta)
+          job.totalSize = formatBytes(p.total_bytes)
+          notify(job, {
+            type: 'progress',
+            percent: job.percent,
+            totalSize: job.totalSize,
+            speed: job.speed,
+            eta: job.eta,
+          })
+        },
+        onDone: (filepath) => {
+          job.cancel = undefined
+          if (!filepath) {
+            job.status = 'error'
+            job.error = 'no filepath returned'
+            notify(job, { type: 'error', message: job.error })
+            return
           }
-          return
-        }
+          job.filePath = filepath
+          job.fileName = path.basename(filepath)
 
-        const runBurn = () => {
-          if (burnSubtitles && isVideo) {
-            burnSubtitlesFn(job, runDone)
-          } else {
-            runDone()
+          const isVideo = formatId !== 'ba'
+
+          const runDone = () => {
+            job.status = 'done'
+            job.percent = 100
+            notify(job, { type: 'done', fileName: job.fileName! })
           }
-        }
 
-        if (verticalPad && isVideo) {
-          convertToVertical(job, runBurn)
-        } else {
-          runBurn()
-        }
-      } else if (attempt < MAX_RETRIES && isRetryable(stderrOutput)) {
-        // Retry after delay
-        const nextAttempt = attempt + 1
-        console.log(`[yt-dlp] Retrying (${nextAttempt + 1}/${MAX_RETRIES + 1})...`)
-        notify(job, { type: 'retry', attempt: nextAttempt + 1, maxRetries: MAX_RETRIES + 1 })
-        setTimeout(() => attemptDownload(nextAttempt), RETRY_DELAY_MS * (nextAttempt))
-      } else {
-        job.status = 'error'
-        job.error = extractError(stderrOutput, code)
-        notify(job, { type: 'error', message: job.error })
-      }
-    })
+          // Instant mode: client does ALL re-encoding (pad, subtitle burn, both).
+          // Server only runs Groq when subtitles are requested — otherwise hand
+          // over the raw downloaded file untouched.
+          if (instantMode && isVideo) {
+            if (burnSubtitles) {
+              generateSubtitlesOnly(job, runDone)
+            } else {
+              runDone()
+            }
+            return
+          }
+
+          const runBurn = () => {
+            if (burnSubtitles && isVideo) {
+              burnSubtitlesFn(job, runDone)
+            } else if (isVideo && !verticalPad) {
+              // No pad, no subs — verify the codec is iOS-Photos-compatible.
+              // pad/subs paths already re-encode to H.264 via libx264, so
+              // this only matters when nothing else touched the file.
+              transcodeIfNotIosCompat(job, runDone)
+            } else {
+              runDone()
+            }
+          }
+
+          if (verticalPad && isVideo) {
+            convertToVertical(job, runBurn)
+          } else {
+            runBurn()
+          }
+        },
+        onError: (message, traceback) => {
+          job.cancel = undefined
+          lastError = message
+          if (traceback) console.error('[ytdlp-pool trace]', traceback)
+          if (attempt < MAX_RETRIES && isRetryable(message)) {
+            const nextAttempt = attempt + 1
+            console.log(`[ytdlp-pool] Retrying (${nextAttempt + 1}/${MAX_RETRIES + 1}): ${message.slice(0, 120)}`)
+            notify(job, { type: 'retry', attempt: nextAttempt + 1, maxRetries: MAX_RETRIES + 1 })
+            setTimeout(() => attemptDownload(nextAttempt), RETRY_DELAY_MS * (nextAttempt))
+          } else {
+            job.status = 'error'
+            job.error = lastError || 'Download failed'
+            notify(job, { type: 'error', message: job.error })
+          }
+        },
+      },
+    )
+    job.cancel = cancelFn
   }
 
   attemptDownload(0)
   return job
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes) return ''
+  const units = ['B', 'KiB', 'MiB', 'GiB']
+  let v = bytes
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v >= 10 ? 0 : 1)}${units[i]}`
+}
+
+function formatSpeed(bps: number): string {
+  if (!bps) return ''
+  return `${formatBytes(bps)}/s`
+}
+
+function formatEta(seconds: number): string {
+  if (!seconds || seconds < 0) return ''
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
 export function startDownloadWithCookies(id: string, url: string, cookiesTxt?: string): DownloadJob {
@@ -942,7 +1041,12 @@ export function cancelDownload(id: string) {
   const job = downloads.get(id)
   if (!job) return
 
-  // 1. Kill any active child process (yt-dlp, ffmpeg, etc.)
+  // 1a. Ask the ytdlp pool to drop/kill this job's worker, if any
+  if (job.cancel) {
+    try { job.cancel() } catch {}
+    job.cancel = undefined
+  }
+  // 1b. Kill any active child process (ffmpeg, etc.) — yt-dlp runs in the pool
   if (job.process) {
     try { job.process.kill('SIGKILL') } catch {}
     job.process = undefined
