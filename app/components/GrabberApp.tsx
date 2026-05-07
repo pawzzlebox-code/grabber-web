@@ -31,6 +31,9 @@ interface DownloadJob {
   error?: string
   url: string
   formatLabel: string
+  // Set when the file is too big for in-memory share-to-Photos and the
+  // user should be offered a direct-download-to-Files button instead.
+  directOnly?: boolean
 }
 
 // Persist settings in localStorage
@@ -432,9 +435,20 @@ export default function GrabberApp() {
             // only when desktop isn't being used + WebCodecs is supported.
             const usingDesktop = !settings.skipDesktop && !!(desktopTunnelUrl && settings.desktopKey)
             const useInstant = !usingDesktop && webCodecsSupported && (settings.burnSubtitles || settings.verticalPad)
+            // iOS Safari OOM-kills the tab if a Blob exceeds ~250-300 MB,
+            // and `navigator.share` requires the file fully in memory. So
+            // for big files we fall back to a plain <a download> link —
+            // Safari streams the bytes straight to the Files app, no JS
+            // ever holds them. User loses the Save-to-Photos sheet but
+            // actually gets the file.
+            const SHARE_SIZE_LIMIT = 150 * 1024 * 1024
+            const tooBigToShare = typeof state.fileSize === 'number' && state.fileSize > SHARE_SIZE_LIMIT
             if (useInstant) {
               // Instant mode: fetch raw video, process on-device with WebCodecs.
               prefetchAndProcess(data.id, state.fileName, state.srt || '', settings.verticalPad, settings.burnSubtitles)
+            } else if (tooBigToShare) {
+              setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] file ${(state.fileSize / 1024 / 1024).toFixed(1)}MB > 150MB — using direct download (no Save-to-Photos)`])
+              setDownloads(prev => prev.map(d => d.id === data.id ? { ...d, directOnly: true } : d))
             } else if (typeof navigator !== 'undefined' && 'share' in navigator) {
               prefetchFile(data.id, state.fileName)
             } else {
@@ -1205,6 +1219,19 @@ export default function GrabberApp() {
                                   : 'Preparing...'}
                               </span>
                             </div>
+                          </div>
+                        ) : dl.directOnly ? (
+                          // File too big for in-memory share — direct download to Files only.
+                          <div className="space-y-1.5">
+                            <button
+                              onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
+                              className="w-full py-2 bg-sky-500 hover:bg-sky-600 rounded-lg text-xs font-medium text-white transition-colors"
+                            >
+                              Download to Files
+                            </button>
+                            <p className="text-[10px] text-neutral-500 text-center">
+                              File too large for Save to Photos — saves to Files app instead
+                            </p>
                           </div>
                         ) : canShare && fileReady[dl.id] ? (
                           <div className="flex gap-1.5">

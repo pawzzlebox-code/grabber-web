@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDownload } from '@/lib/downloads'
+import fs from 'fs'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,6 +17,13 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   const logsSince = logsSinceParam ? parseInt(logsSinceParam) : 0
   const newLogs = job.logs.slice(logsSince)
 
+  // Stat the on-disk file once download is done so the client can decide
+  // whether to share-to-Photos (small) or stream-to-Files (large).
+  let fileSize: number | undefined
+  if (job.status === 'done' && job.filePath) {
+    try { fileSize = fs.statSync(job.filePath).size } catch {}
+  }
+
   return NextResponse.json({
     id: job.id,
     status: job.status,
@@ -24,6 +32,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     eta: job.eta,
     totalSize: job.totalSize,
     fileName: job.fileName,
+    fileSize,
     error: job.error,
     logs: newLogs,
     logsTotal: job.logs.length,
