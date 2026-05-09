@@ -691,7 +691,12 @@ export default function GrabberApp() {
 
   // Desktop fallback — normal browser download
   const triggerFileDownload = (id: string, fileName: string) => {
-    const fileUrl = `${apiBase()}/api/file/${id}`
+    // For desktop-routed downloads we have to pass the cookie key via the
+    // URL — Safari strips custom headers from <a download> navigations,
+    // so the desktop's webserver would 401 without an inline key.
+    const usingDesktop = !settings.skipDesktop && !!(desktopTunnelUrl && settings.desktopKey)
+    const keyParam = usingDesktop ? `?key=${encodeURIComponent(settings.desktopKey)}` : ''
+    const fileUrl = `${apiBase()}/api/file/${id}${keyParam}`
     const name = fileName || 'video.mp4'
     const a = document.createElement('a')
     a.href = fileUrl
