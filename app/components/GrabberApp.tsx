@@ -435,20 +435,9 @@ export default function GrabberApp() {
             // only when desktop isn't being used + WebCodecs is supported.
             const usingDesktop = !settings.skipDesktop && !!(desktopTunnelUrl && settings.desktopKey)
             const useInstant = !usingDesktop && webCodecsSupported && (settings.burnSubtitles || settings.verticalPad)
-            // iOS Safari OOM-kills the tab if a Blob exceeds ~250-300 MB,
-            // and `navigator.share` requires the file fully in memory. So
-            // for big files we fall back to a plain <a download> link —
-            // Safari streams the bytes straight to the Files app, no JS
-            // ever holds them. User loses the Save-to-Photos sheet but
-            // actually gets the file.
-            const SHARE_SIZE_LIMIT = 150 * 1024 * 1024
-            const tooBigToShare = typeof state.fileSize === 'number' && state.fileSize > SHARE_SIZE_LIMIT
             if (useInstant) {
               // Instant mode: fetch raw video, process on-device with WebCodecs.
               prefetchAndProcess(data.id, state.fileName, state.srt || '', settings.verticalPad, settings.burnSubtitles)
-            } else if (tooBigToShare) {
-              setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] file ${(state.fileSize / 1024 / 1024).toFixed(1)}MB > 150MB — using direct download (no Save-to-Photos)`])
-              setDownloads(prev => prev.map(d => d.id === data.id ? { ...d, directOnly: true } : d))
             } else if (typeof navigator !== 'undefined' && 'share' in navigator) {
               prefetchFile(data.id, state.fileName)
             } else {
