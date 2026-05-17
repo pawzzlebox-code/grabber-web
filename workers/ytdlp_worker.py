@@ -82,6 +82,16 @@ def make_post_hook(ctx):
 
 def run_download(cmd):
     ctx = JobContext(cmd['job_id'])
+    # Fake Chrome's TLS/HTTP/2 fingerprint via curl-cffi when available.
+    # Bypasses sites that 410-block yt-dlp's stock urllib fingerprint
+    # (Pornhub etc.). Silently no-ops if curl-cffi isn't installed.
+    impersonate = None
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        impersonate = ImpersonateTarget(client='chrome')
+    except Exception:
+        pass
+
     opts = {
         'outtmpl': {'default': cmd['outtmpl']},
         'format': cmd.get('format') or 'bestvideo*+bestaudio/best',
@@ -97,6 +107,8 @@ def run_download(cmd):
         'progress_hooks': [make_progress_hook(ctx)],
         'post_hooks': [make_post_hook(ctx)],
     }
+    if impersonate is not None:
+        opts['impersonate'] = impersonate
     if cmd.get('playlist_items'):
         opts['playlist_items'] = str(cmd['playlist_items'])
     if cmd.get('proxy'):

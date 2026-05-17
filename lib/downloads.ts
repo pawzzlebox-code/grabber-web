@@ -234,6 +234,10 @@ export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInf
       '--dump-json',
       '--no-check-formats',
       '--encoding', 'utf-8',
+      // Fake Chrome's TLS fingerprint via curl-cffi. Bypasses sites that
+      // 410-block yt-dlp's stock Python urllib fingerprint (e.g. Pornhub).
+      // Cheap and universally harmless on supported extractors.
+      '--impersonate', 'chrome',
       ...proxyArgs(url),
       ...cookieArgs(),
     ]
