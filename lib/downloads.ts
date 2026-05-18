@@ -929,10 +929,16 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     ? process.env.PROXY_URL : undefined
   const cookies = fs.existsSync(COOKIE_FILE) ? COOKIE_FILE : undefined
 
-  function attemptDownload(attempt: number) {
+  function attemptDownload(attempt: number, useFallbackFormat: boolean = false) {
     job.percent = 0
     job.eta = ''
     let lastError = ''
+    // YouTube's format manifest rotates between metadata fetch + download
+    // start, so the formatId the phone selected (e.g. "137+bestaudio") may
+    // already be invalid. On "Requested format is not available", retry
+    // once with a resilient best-available chain.
+    const fallbackFmt = "bv*[vcodec~='^(avc|h264)']+ba/b[vcodec~='^(avc|h264)']/bv*+ba/b"
+    const activeFormat = useFallbackFormat ? fallbackFmt : (formatId || defaultFmt)
 
     // Stall detector: if no progress event fires within 90s, the stream
     // fetch is almost certainly being throttled/RSTed by YouTube/CDN.
@@ -957,7 +963,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
       {
         job_id: id,
         url,
-        format: formatId || defaultFmt,
+        format: activeFormat,
         outtmpl: path.join(TEMP_DIR, `${id}_%(title).80B.%(ext)s`),
         proxy,
         cookies,
@@ -1052,6 +1058,15 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           job.cancel = undefined
           lastError = message
           if (traceback) console.error('[ytdlp-pool trace]', traceback)
+          // Stale formatId — immediately retry with the resilient
+          // H.264-preferred chain instead of using a retry slot.
+          if (!useFallbackFormat && /Requested format is not available/i.test(message)) {
+            console.log(`[ytdlp-pool] Format "${activeFormat}" stale, retrying with H.264-preferred fallback`)
+            job.speed = 'Format rotated, retrying...'
+            notify(job, { type: 'status', message: job.speed })
+            setTimeout(() => attemptDownload(attempt, true), 200)
+            return
+          }
           if (attempt < MAX_RETRIES && isRetryable(message)) {
             const nextAttempt = attempt + 1
             console.log(`[ytdlp-pool] Retrying (${nextAttempt + 1}/${MAX_RETRIES + 1}): ${message.slice(0, 120)}`)
