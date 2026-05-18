@@ -106,6 +106,9 @@ def run_download(cmd):
         'no_warnings': False,
         'progress_hooks': [make_progress_hook(ctx)],
         'post_hooks': [make_post_hook(ctx)],
+        # Enable YouTube's signature/n challenge solver. Without ejs:github
+        # YouTube returns only storyboards for most modern videos.
+        'remote_components': ['ejs:github'],
     }
     if impersonate is not None:
         opts['impersonate'] = impersonate

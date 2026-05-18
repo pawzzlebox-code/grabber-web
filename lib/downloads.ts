@@ -244,8 +244,11 @@ export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInf
       '--encoding', 'utf-8',
       // Fake Chrome's TLS fingerprint via curl-cffi. Bypasses sites that
       // 410-block yt-dlp's stock Python urllib fingerprint (e.g. Pornhub).
-      // Cheap and universally harmless on supported extractors.
       '--impersonate', 'chrome',
+      // YouTube's signature/n challenges require an external JS solver
+      // (EJS). Fetched from yt-dlp's official GitHub repo; cached locally
+      // after first use. Without this YouTube returns only storyboards.
+      '--remote-components', 'ejs:github',
       ...proxyArgs(url),
       ...cookieArgs(),
     ]
