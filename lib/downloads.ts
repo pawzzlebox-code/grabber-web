@@ -34,6 +34,10 @@ export interface DownloadJob {
   duration?: number
   logs: string[]
   srt?: string
+  // Source video codec (e.g. "h264", "vp9", "av1"). Set after yt-dlp
+  // finishes. The client uses this to decide whether to run WebCodecs
+  // for iOS-compat transcoding — much faster than the droplet's CPU.
+  sourceCodec?: string
 }
 
 const downloads = new Map<string, DownloadJob>()
@@ -372,6 +376,7 @@ async function transcodeIfNotIosCompat(job: DownloadJob, onComplete: () => void)
   }
 
   const codec = await probeVideoCodec(inputPath)
+  job.sourceCodec = codec // Stash so /api/progress can return it to the client
   if (codec === 'h264' || codec === 'hevc') {
     log(`source codec=${codec} — iOS-compatible, skipping transcode`)
     onComplete()
@@ -1039,15 +1044,20 @@ export function startDownload(id: string, url: string, formatId?: string, title?
             notify(job, { type: 'done', fileName: job.fileName! })
           }
 
-          // Instant mode: client does ALL re-encoding (pad, subtitle burn, both).
-          // Server only runs Groq when subtitles are requested — otherwise hand
-          // over the raw downloaded file untouched.
+          // Instant mode: client does ALL re-encoding (pad, subtitle burn,
+          // codec transcode). Server only runs Groq when subtitles are
+          // requested — otherwise hand over the raw downloaded file
+          // untouched. We still probe the codec so /api/progress can tell
+          // the client whether a WebCodecs re-encode is actually needed.
           if (instantMode && isVideo) {
-            if (burnSubtitles) {
-              generateSubtitlesOnly(job, runDone)
-            } else {
-              runDone()
-            }
+            probeVideoCodec(job.filePath!).then((codec) => {
+              job.sourceCodec = codec
+              if (burnSubtitles) {
+                generateSubtitlesOnly(job, runDone)
+              } else {
+                runDone()
+              }
+            })
             return
           }
 

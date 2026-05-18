@@ -352,10 +352,13 @@ export default function GrabberApp() {
 
     // Wait for the WebCodecs probe to settle so the auto-pick is correct.
     const probed = webCodecsProbe.current ? await webCodecsProbe.current : false
-    // Auto-pick: instant mode kicks in when desktop ISN'T being used, the
-    // browser supports WebCodecs, and there's actually post-processing to do.
+    // Auto-pick: instant mode whenever desktop ISN'T being used AND the
+    // browser supports WebCodecs. The server now hands back the raw file
+    // and the client handles any required transcoding (codec mismatch,
+    // pad to 9:16, burn subs) on the iPhone's hardware encoder — way
+    // faster than the droplet's 1-vCPU libx264.
     const usingDesktop = !!apiBase()
-    const useInstant = !usingDesktop && probed && (settings.burnSubtitles || settings.verticalPad)
+    const useInstant = !usingDesktop && probed
     try {
       const res = await fetch(`${apiBase()}/api/download`, {
         method: 'POST',
@@ -431,10 +434,19 @@ export default function GrabberApp() {
 
           if (state.status === 'done' && !donePrefetched) {
             donePrefetched = true
-            // Mirror the client-side auto-pick from the request: instant mode
-            // only when desktop isn't being used + WebCodecs is supported.
             const usingDesktop = !settings.skipDesktop && !!(desktopTunnelUrl && settings.desktopKey)
-            const useInstant = !usingDesktop && webCodecsSupported && (settings.burnSubtitles || settings.verticalPad)
+            // WebCodecs handles three jobs locally now: 9:16 pad, subtitle
+            // burn, and codec transcode (when source isn't iOS-Photos-
+            // compatible — VP9/AV1 etc). The server only intervened for
+            // codec when WebCodecs was unsupported.
+            const needsTranscode = !!state.sourceCodec
+              && state.sourceCodec !== 'h264'
+              && state.sourceCodec !== 'hevc'
+            const needsWebCodecs = settings.burnSubtitles || settings.verticalPad || needsTranscode
+            const useInstant = !usingDesktop && webCodecsSupported && needsWebCodecs
+            if (needsTranscode) {
+              setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] source codec=${state.sourceCodec} — transcoding on device via WebCodecs`])
+            }
             if (useInstant) {
               // Instant mode: fetch raw video, process on-device with WebCodecs.
               prefetchAndProcess(data.id, state.fileName, state.srt || '', settings.verticalPad, settings.burnSubtitles)

@@ -33,6 +33,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     totalSize: job.totalSize,
     fileName: job.fileName,
     fileSize,
+    sourceCodec: job.sourceCodec,
     error: job.error,
     logs: newLogs,
     logsTotal: job.logs.length,
