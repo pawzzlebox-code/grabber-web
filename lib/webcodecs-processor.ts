@@ -420,7 +420,21 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
       const aSink = new EncodedPacketSink(aTrack)
       let first = true
       let audioPacketCount = 0
+      let droppedNegative = 0
       for await (const packet of aSink.packets()) {
+        // WebM/Opus streams from Instagram/YouTube sometimes start with a
+        // few packets at negative timestamps (edit-list trick for A/V sync).
+        // The MP4 muxer rejects negative timestamps outright, so skip those
+        // packets — we lose ~100ms of audio at the very start in exchange
+        // for the file actually finalizing. mediabunny's Packet uses
+        // microsecond timestamps under the hood.
+        const ts = (packet as { microsecondTimestamp?: number; timestamp?: number }).microsecondTimestamp
+          ?? (packet as { timestamp?: number }).timestamp
+          ?? 0
+        if (ts < 0) {
+          droppedNegative++
+          continue
+        }
         if (first) {
           await audioSource.add(packet, { decoderConfig })
           first = false
@@ -433,6 +447,9 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
           options.onProgress(Math.min(98, 95 + Math.floor(audioPacketCount / 100)), 'Copying audio...')
           await new Promise(r => setTimeout(r, 0))
         }
+      }
+      if (droppedNegative > 0) {
+        console.log(`[WebCodecs] Dropped ${droppedNegative} audio packets with negative timestamps`)
       }
     } finally {
       audioSource.close()

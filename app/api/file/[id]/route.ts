@@ -43,15 +43,18 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
       stream.on('end', () => {
         streamComplete = true
         controller.close()
-        // Delete file from server after successful transfer
-        setTimeout(() => deleteDownload(jobId), 2000)
+        // Keep the file around for 5 min after the stream completes so the
+        // client can retry / fall back (e.g. WebCodecs failed mid-encode,
+        // user wants to switch to plain download). After that the orphan
+        // sweeper at 60 min handles permanent cleanup.
+        setTimeout(() => deleteDownload(jobId), 5 * 60 * 1000)
       })
       stream.on('error', (err) => controller.error(err))
     },
     cancel() {
       stream.destroy()
-      // If client cancels mid-stream, don't delete (they might retry)
-      if (streamComplete) setTimeout(() => deleteDownload(jobId), 2000)
+      // Cancel mid-stream — let the orphan sweeper handle deletion; no
+      // immediate timer needed since the client clearly wants to retry.
     }
   })
 
