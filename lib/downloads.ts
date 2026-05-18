@@ -52,11 +52,19 @@ function cookieArgs(): string[] {
 function proxyArgs(url?: string): string[] {
   const proxy = process.env.PROXY_URL
   if (!proxy) return []
-  // Skip proxy for sites where the Indian proxy causes issues
+  // Bypass the proxy for sites that work fine from the droplet's raw IP
+  // but get extra-aggressively bot-flagged through Cloudflare WARP exits.
+  // YouTube especially treats WARP IPs as suspicious and returns the
+  // "Sign in to confirm you're not a bot" wall.
   if (url) {
     try {
       const host = new URL(url).hostname.replace('www.', '')
-      if (['twitter.com', 'x.com', 't.co', 'instagram.com'].includes(host)) return []
+      const bypassHosts = [
+        'twitter.com', 'x.com', 't.co',
+        'instagram.com',
+        'youtube.com', 'youtu.be', 'm.youtube.com',
+      ]
+      if (bypassHosts.some(h => host === h || host.endsWith('.' + h))) return []
     } catch {}
   }
   return ['--proxy', proxy]
@@ -924,9 +932,15 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   job.speed = hostname ? `Contacting ${hostname}...` : 'Starting...'
   notify(job, { type: 'status', message: job.speed })
 
-  const proxy = process.env.PROXY_URL
-    && !(hostname && ['twitter.com', 'x.com', 't.co', 'instagram.com'].includes(hostname))
-    ? process.env.PROXY_URL : undefined
+  // Same bypass list as proxyArgs() — YouTube/Twitter/Insta work better
+  // from the droplet's raw IP than through WARP, which gets bot-flagged.
+  const bypassHosts = [
+    'twitter.com', 'x.com', 't.co',
+    'instagram.com',
+    'youtube.com', 'youtu.be', 'm.youtube.com',
+  ]
+  const proxyBypassed = !!hostname && bypassHosts.some(h => hostname === h || hostname.endsWith('.' + h))
+  const proxy = process.env.PROXY_URL && !proxyBypassed ? process.env.PROXY_URL : undefined
   const cookies = fs.existsSync(COOKIE_FILE) ? COOKIE_FILE : undefined
 
   function attemptDownload(attempt: number, useFallbackFormat: boolean = false) {
