@@ -367,6 +367,10 @@ function probeVideoCodec(filePath: string): Promise<string> {
 // to H.264 so iOS Photos accepts it. No pad / no subs — pure codec-only
 // transcode. Mirrors webserver.ts on the desktop side; only matters when
 // neither pad nor subs already ran (those paths produce H.264 via libx264).
+//
+// Twitter is a special case: even H.264 sources fail to import into iOS
+// Photos because of non-square SAR + unusual stream profile. Force a
+// re-encode for those URLs regardless of codec.
 async function transcodeIfNotIosCompat(job: DownloadJob, onComplete: () => void): Promise<void> {
   const inputPath = job.filePath!
 
@@ -377,12 +381,17 @@ async function transcodeIfNotIosCompat(job: DownloadJob, onComplete: () => void)
 
   const codec = await probeVideoCodec(inputPath)
   job.sourceCodec = codec // Stash so /api/progress can return it to the client
-  if (codec === 'h264' || codec === 'hevc') {
+  const twitter = isTwitterUrl(job.url)
+  if ((codec === 'h264' || codec === 'hevc') && !twitter) {
     log(`source codec=${codec} — iOS-compatible, skipping transcode`)
     onComplete()
     return
   }
-  log(`source codec=${codec || 'unknown'} — transcoding to H.264 for iOS Photos`)
+  if (twitter) {
+    log(`twitter source — forcing iOS-compat re-encode (setsar=1 + main profile)`)
+  } else {
+    log(`source codec=${codec || 'unknown'} — transcoding to H.264 for iOS Photos`)
+  }
 
   await acquireFfmpegSlot()
   const finish = () => { releaseFfmpegSlot(); onComplete() }
@@ -390,12 +399,15 @@ async function transcodeIfNotIosCompat(job: DownloadJob, onComplete: () => void)
   const outputPath = inputPath.replace(/\.[^.]+$/, '_h264.mp4')
   const args = [
     '-i', inputPath,
+    // setsar=1 normalizes the pixel aspect ratio so iOS Photos doesn't
+    // reject the file (Twitter ships SAR like 1:2 or 5:4 which iOS hates).
+    '-vf', 'setsar=1',
     '-c:v', 'libx264', '-preset', 'superfast', '-crf', '22',
     '-tune', 'fastdecode',
     '-threads', '0',
     '-pix_fmt', 'yuv420p',
     '-profile:v', 'main', '-level', '4.0',
-    '-c:a', 'copy',
+    '-c:a', 'aac', '-b:a', '128k',
     '-movflags', '+faststart',
     '-y',
     '-progress', 'pipe:1',
@@ -981,6 +993,13 @@ export function startDownload(id: string, url: string, formatId?: string, title?
       }
     }, 10_000)
 
+    // Detect audio-only requests so the worker can run the MP3 postprocessor.
+    // Phone sends formatId='ba' for the Audio Only preset; also catch
+    // bestaudio / explicit audio format ids defensively.
+    const audioOnly = formatId === 'ba'
+      || formatId === 'bestaudio'
+      || /^(?:bestaudio|ba)(?:\[|\b|$)/i.test(formatId || '')
+
     const cancelFn = dispatchDownload(
       {
         job_id: id,
@@ -991,6 +1010,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         cookies,
         playlist_items: (!twitter || playlistIndex === undefined) ? undefined : playlistIndex,
         no_playlist: !twitter,
+        audio_only: audioOnly,
       },
       {
         onStatus: (message) => {

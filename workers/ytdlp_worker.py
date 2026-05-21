@@ -112,6 +112,14 @@ def run_download(cmd):
     }
     if impersonate is not None:
         opts['impersonate'] = impersonate
+    # Audio-only: ask yt-dlp to extract to MP3 so apps like CapCut (which
+    # rejects webm/opus / m4a/AAC-LC raw streams) can import the file.
+    if cmd.get('audio_only'):
+        opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
     if cmd.get('playlist_items'):
         opts['playlist_items'] = str(cmd['playlist_items'])
     if cmd.get('proxy'):

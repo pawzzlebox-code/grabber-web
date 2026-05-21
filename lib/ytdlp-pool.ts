@@ -20,6 +20,10 @@ export interface DownloadCommand {
   cookies?: string
   playlist_items?: string | number
   no_playlist: boolean
+  // When true, the worker adds an FFmpegExtractAudio postprocessor so the
+  // output is MP3 (192 kbps) instead of the raw audio container yt-dlp
+  // would otherwise download (webm/m4a). Required for CapCut compatibility.
+  audio_only?: boolean
 }
 
 export interface ProgressMsg {
