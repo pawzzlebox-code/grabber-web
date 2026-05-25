@@ -435,17 +435,24 @@ export default function GrabberApp() {
           if (state.status === 'done' && !donePrefetched) {
             donePrefetched = true
             const usingDesktop = !settings.skipDesktop && !!(desktopTunnelUrl && settings.desktopKey)
-            // WebCodecs handles three jobs locally now: 9:16 pad, subtitle
-            // burn, and codec transcode (when source isn't iOS-Photos-
-            // compatible — VP9/AV1 etc). The server only intervened for
-            // codec when WebCodecs was unsupported.
-            const needsTranscode = !!state.sourceCodec
+            // WebCodecs handles four jobs locally: 9:16 pad, subtitle burn,
+            // codec transcode (when source isn't iOS-Photos-compatible —
+            // VP9/AV1), AND iOS-fixup for Twitter (H.264 source but with
+            // non-square SAR + odd profile that iOS Photos rejects).
+            const needsCodecTranscode = !!state.sourceCodec
               && state.sourceCodec !== 'h264'
               && state.sourceCodec !== 'hevc'
-            const needsWebCodecs = settings.burnSubtitles || settings.verticalPad || needsTranscode
+            let isTwitter = false
+            try {
+              const h = new URL(video.url).hostname.replace(/^www\./, '')
+              isTwitter = h === 'twitter.com' || h === 'x.com' || h === 't.co'
+            } catch {}
+            const needsWebCodecs = settings.burnSubtitles || settings.verticalPad || needsCodecTranscode || isTwitter
             const useInstant = !usingDesktop && webCodecsSupported && needsWebCodecs
-            if (needsTranscode) {
+            if (needsCodecTranscode) {
               setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] source codec=${state.sourceCodec} — transcoding on device via WebCodecs`])
+            } else if (isTwitter) {
+              setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] twitter source — re-encoding on device via WebCodecs for iOS Photos`])
             }
             if (useInstant) {
               // Instant mode: fetch raw video, process on-device with WebCodecs.
