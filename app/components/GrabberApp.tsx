@@ -420,10 +420,10 @@ export default function GrabberApp() {
       clearTimeout(timeoutId)
       setLoading(false)
     }
-    // Deps: apiBase/apiHeaders close over desktopTunnelUrl and
-    // settings.desktopKey, so they need to be in deps for the callback to
-    // pick up the live values once the tunnel registers.
-  }, [desktopTunnelUrl, settings.desktopKey])
+    // Deps: apiBase/apiHeaders close over desktopTunnelUrl + desktopKey,
+    // and the early-return for Photos mode closes over settings.photoMode
+    // + startPhotoJob — all need to be in deps so the closure stays fresh.
+  }, [desktopTunnelUrl, settings.desktopKey, settings.photoMode, startPhotoJob])
 
   const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string) => {
     // Direct download mode: browser fetches from source URL
