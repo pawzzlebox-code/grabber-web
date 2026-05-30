@@ -47,10 +47,18 @@ const TEMP_DIR = path.join(os.tmpdir(), 'grabber-downloads')
 const COOKIE_FILE = path.join(TEMP_DIR, 'cookies.txt')
 
 function cookieArgs(): string[] {
-  if (fs.existsSync(COOKIE_FILE)) {
-    return ['--cookies', COOKIE_FILE]
-  }
-  return []
+  if (!fs.existsSync(COOKIE_FILE)) return []
+  // Defensive: yt-dlp rejects an empty file or one missing the Netscape
+  // header with 'does not look like a Netscape format cookies file' and
+  // aborts the whole job. Validate before passing the flag so a broken
+  // sync doesn't break unrelated downloads.
+  try {
+    const stat = fs.statSync(COOKIE_FILE)
+    if (stat.size === 0) return []
+    const head = fs.readFileSync(COOKIE_FILE, { encoding: 'utf-8', flag: 'r' }).slice(0, 60)
+    if (!/Netscape HTTP Cookie File/i.test(head)) return []
+  } catch { return [] }
+  return ['--cookies', COOKIE_FILE]
 }
 
 function proxyArgs(url?: string): string[] {
