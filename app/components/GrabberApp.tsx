@@ -42,7 +42,7 @@ interface DownloadJob {
 // the user has a desktopKey saved; else WebCodecs if the browser supports
 // it; else server-side. desktopKey moves to "Advanced" since most users
 // won't configure it, and direct download joins it there.
-const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '', skipDesktop: false }
+const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '', skipDesktop: false, photoMode: false }
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
@@ -129,6 +129,21 @@ export default function GrabberApp() {
     abort?: AbortController
     worker?: { cancel: () => void }
   }>>({})
+
+  // Photo jobs (gallery-dl). Separate state from `downloads` (which is for
+  // yt-dlp video jobs) because the data shape is different — a single photo
+  // job produces N files served as a grid, not one video file.
+  interface PhotoFile { index: number; name: string; size: number }
+  interface PhotoJob {
+    id: string
+    url: string
+    status: 'downloading' | 'done' | 'error'
+    files: PhotoFile[]
+    error?: string
+    // Per-file save progress when bulk-saving (% loaded into memory).
+    savePct?: number
+  }
+  const [photoJobs, setPhotoJobs] = useState<PhotoJob[]>([])
 
   useEffect(() => {
     webCodecsProbe.current = isWebCodecsSupported().catch(() => false)
@@ -265,8 +280,98 @@ export default function GrabberApp() {
     }
   }, [videos, settings.autoBest])
 
+  // Fetch every photo of a job into memory and trigger ONE navigator.share
+  // call with all files. iOS Photos saves them in bulk.
+  const handlePhotoSaveAll = async (job: PhotoJob) => {
+    if (!job.files.length) return
+    setPhotoJobs(prev => prev.map(j => j.id === job.id ? { ...j, savePct: 0 } : j))
+    try {
+      const files: File[] = []
+      for (let i = 0; i < job.files.length; i++) {
+        const meta = job.files[i]
+        const r = await fetch(`/api/photos/${job.id}/file/${meta.index}`, { cache: 'no-store' })
+        if (!r.ok) throw new Error(`Failed to fetch ${meta.name}`)
+        const blob = await r.blob()
+        files.push(new File([blob], meta.name, { type: blob.type || 'application/octet-stream' }))
+        setPhotoJobs(prev => prev.map(j => j.id === job.id
+          ? { ...j, savePct: Math.round(((i + 1) / job.files.length) * 100) }
+          : j))
+      }
+      if (typeof navigator !== 'undefined' && navigator.canShare?.({ files })) {
+        await navigator.share({ files })
+      } else {
+        // Fallback for desktop browsers — download each as a blob URL.
+        for (const f of files) {
+          const url = URL.createObjectURL(f)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = f.name
+          document.body.appendChild(a); a.click(); document.body.removeChild(a)
+          setTimeout(() => URL.revokeObjectURL(url), 1000)
+        }
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return // user dismissed share sheet
+      setError(`Save failed: ${err?.message || err}`)
+    } finally {
+      setPhotoJobs(prev => prev.map(j => j.id === job.id ? { ...j, savePct: undefined } : j))
+    }
+  }
+
+  const removePhotoJob = (id: string) => {
+    fetch(`/api/photos/${id}`, { method: 'DELETE', cache: 'no-store' }).catch(() => {})
+    setPhotoJobs(prev => prev.filter(j => j.id !== id))
+  }
+
+  // Start a gallery-dl job on the droplet. Skips metadata + format picking
+  // entirely — just submits the URL and polls the job until files arrive.
+  const startPhotoJob = useCallback(async (rawUrl: string) => {
+    const u = rawUrl.trim()
+    if (!u) return
+    setError('')
+    const log = (msg: string) => setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] ${msg}`])
+    log(`photos: starting ${u}`)
+    try {
+      const res = await fetch('/api/photos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: u }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'failed')
+      const newJob: PhotoJob = { id: data.id, url: u, status: 'downloading', files: [] }
+      setPhotoJobs(prev => [newJob, ...prev])
+
+      // Poll every 1s while downloading.
+      const poll = async () => {
+        try {
+          const r = await fetch(`/api/photos/${data.id}`, { cache: 'no-store' })
+          if (!r.ok) return
+          const state = await r.json() as { status: PhotoJob['status']; files: PhotoFile[]; error?: string }
+          setPhotoJobs(prev => prev.map(j => j.id === data.id ? {
+            ...j, status: state.status, files: state.files, error: state.error,
+          } : j))
+          return state.status
+        } catch {}
+      }
+      const interval = setInterval(async () => {
+        const st = await poll()
+        if (st === 'done' || st === 'error') clearInterval(interval)
+      }, 1000)
+      await poll()
+    } catch (err: any) {
+      log(`photos: error — ${err.message}`)
+      setError(err.message || 'Failed to start photo job')
+    }
+  }, [])
+
   const fetchInfo = useCallback(async (videoUrl: string) => {
     if (!videoUrl.trim()) return
+    // Photos mode: route the URL through gallery-dl instead of yt-dlp.
+    if (settings.photoMode) {
+      startPhotoJob(videoUrl)
+      return
+    }
     setLoading(true)
     setError('')
     setVideos([])
@@ -880,6 +985,19 @@ export default function GrabberApp() {
             </label>
           </div>
 
+          {/* Photos mode — route URLs through gallery-dl instead of yt-dlp.
+              For image posts, carousels, Pixiv illustrations, etc. */}
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-white">Photos mode</p>
+              <p className="text-[11px] text-neutral-500">Use gallery-dl for image posts & carousels</p>
+            </div>
+            <label className="relative inline-flex cursor-pointer">
+              <input type="checkbox" checked={settings.photoMode} onChange={(e) => setSettings(s => ({ ...s, photoMode: e.target.checked }))} className="sr-only peer" />
+              <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-pink-500 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+            </label>
+          </div>
+
           {/* Skip-desktop override. Greyed out until a desktopKey is set —
               if no desktop is configured there's nothing to skip. */}
           <div className={`flex items-center justify-between ${!settings.desktopKey ? 'opacity-40' : ''}`}>
@@ -1110,6 +1228,72 @@ export default function GrabberApp() {
                 Download All ({videos.length} videos)
               </button>
             )}
+          </div>
+        )}
+
+        {/* Photo jobs (gallery-dl) — separate section with grid layout. */}
+        {photoJobs.length > 0 && (
+          <div className="space-y-3">
+            <h3 className="text-xs font-medium text-neutral-400 uppercase tracking-wider">Photos</h3>
+            {photoJobs.map((job) => (
+              <div key={job.id} className="bg-[#1a1a1a] border border-[#262626] rounded-xl p-3 animate-fade-in space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs text-white truncate">{job.url}</p>
+                    <p className="text-[10px] text-neutral-500 mt-0.5">
+                      {job.status === 'downloading' && <span className="text-pink-400">Downloading… {job.files.length} so far</span>}
+                      {job.status === 'done' && <span className="text-emerald-400">{job.files.length} files ready</span>}
+                      {job.status === 'error' && <span className="text-red-400">Failed — {job.error}</span>}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => removePhotoJob(job.id)}
+                    className="p-0.5 text-neutral-600 hover:text-red-400 transition-colors flex-shrink-0"
+                    title="Remove"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+
+                {/* Thumbnail grid — 3 cols, each tile is square. */}
+                {job.files.length > 0 && (
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {job.files.map((f) => (
+                      <div key={f.index} className="relative aspect-square bg-[#0f0f0f] rounded overflow-hidden border border-[#262626]">
+                        <img
+                          src={`/api/photos/${job.id}/file/${f.index}`}
+                          alt={f.name}
+                          loading="lazy"
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Bulk save — appears once at least one file is ready */}
+                {job.files.length > 0 && job.savePct === undefined && (
+                  <button
+                    onClick={() => handlePhotoSaveAll(job)}
+                    disabled={job.status === 'downloading'}
+                    className="w-full py-2.5 bg-green-500 hover:bg-green-600 disabled:opacity-50 rounded-lg text-sm font-medium text-white transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Download size={14} />
+                    {job.status === 'downloading' ? 'Wait — still fetching…' : `Save all ${job.files.length} to Photos`}
+                  </button>
+                )}
+
+                {/* Bulk save progress */}
+                {job.savePct !== undefined && (
+                  <div className="relative w-full h-9 bg-[#262626] rounded-lg overflow-hidden">
+                    <div className="absolute inset-y-0 left-0 bg-green-500 transition-all duration-200" style={{ width: `${job.savePct}%` }} />
+                    <div className="relative flex items-center justify-center h-full">
+                      <span className="text-xs font-medium text-white">Preparing {job.savePct}%</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
 
