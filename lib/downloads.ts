@@ -81,6 +81,41 @@ function cleanupJobFiles(id: string) {
   } catch {}
 }
 
+// Reclaim disk by deleting everything in TEMP_DIR that ISN'T cookies.txt and
+// ISN'T owned by a currently in-progress download. Completed/errored jobs and
+// orphaned fragments (e.g. from a pm2 restart) get swept immediately. Returns
+// the number of bytes freed. Called by the disk guard before it gives up.
+function reclaimDiskSpace(): number {
+  let freed = 0
+  try {
+    if (!fs.existsSync(TEMP_DIR)) return 0
+    // Prefixes of downloads still running — never touch their files.
+    const activePrefixes: string[] = []
+    for (const [jid, j] of downloads) {
+      if (j.status === 'downloading' || j.status === 'converting' || j.status === 'subtitling') {
+        activePrefixes.push(`${jid}_`)
+      }
+    }
+    for (const name of fs.readdirSync(TEMP_DIR)) {
+      if (name === 'cookies.txt') continue
+      if (activePrefixes.some(p => name.startsWith(p))) continue
+      const full = path.join(TEMP_DIR, name)
+      try {
+        const sz = fs.statSync(full).size
+        fs.unlinkSync(full)
+        freed += sz
+      } catch {}
+    }
+    // Drop reclaimed jobs from the registry so /api/file/:id 404s cleanly.
+    for (const [jid, j] of downloads) {
+      const stillActive = j.status === 'downloading' || j.status === 'converting' || j.status === 'subtitling'
+      if (!stillActive) downloads.delete(jid)
+    }
+    if (freed > 0) console.log(`[downloads] reclaimed ${(freed / 1e9).toFixed(2)}GB of completed/orphaned files`)
+  } catch {}
+  return freed
+}
+
 function cookieArgs(): string[] {
   if (!fs.existsSync(COOKIE_FILE)) return []
   // Defensive: yt-dlp rejects an empty file or one missing the Netscape
@@ -985,15 +1020,23 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   }
   downloads.set(id, job)
 
-  // Disk guard — refuse if the droplet is nearly full. Better a clear error
-  // than a download that fills the disk and silently corrupts cookies.txt.
-  const freeBytes = freeDiskBytes()
+  // Disk guard — if the droplet is nearly full, first auto-reclaim completed
+  // and orphaned files, then re-check. Only refuse if it's STILL tight after
+  // cleanup (i.e. active downloads alone are filling the disk). Better a
+  // clear error than a download that fills the disk and silently corrupts
+  // cookies.txt.
+  let freeBytes = freeDiskBytes()
   if (freeBytes !== null && freeBytes < MIN_FREE_BYTES) {
-    job.status = 'error'
-    job.error = `Server low on disk (${(freeBytes / 1e9).toFixed(1)}GB free) — try again shortly or pick a lower quality.`
-    notify(job, { type: 'error', message: job.error })
-    console.warn(`[downloads] refused job ${id}: only ${(freeBytes / 1e9).toFixed(2)}GB free`)
-    return job
+    const reclaimed = reclaimDiskSpace()
+    freeBytes = freeDiskBytes()
+    if (freeBytes !== null && freeBytes < MIN_FREE_BYTES) {
+      job.status = 'error'
+      job.error = `Server low on disk (${(freeBytes / 1e9).toFixed(1)}GB free after cleanup) — a download may be in progress; try again shortly or pick a lower quality.`
+      notify(job, { type: 'error', message: job.error })
+      console.warn(`[downloads] refused job ${id}: ${(freeBytes / 1e9).toFixed(2)}GB free after reclaiming ${(reclaimed / 1e9).toFixed(2)}GB`)
+      return job
+    }
+    console.log(`[downloads] disk recovered to ${(freeBytes! / 1e9).toFixed(2)}GB free, proceeding with job ${id}`)
   }
 
   const twitter = isTwitterUrl(url)
