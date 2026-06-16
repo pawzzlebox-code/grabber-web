@@ -12,6 +12,7 @@ import {
   VideoSampleSink,
   EncodedPacketSink,
   CanvasSource,
+  VideoSampleSource,
   EncodedAudioPacketSource,
   QUALITY_HIGH,
 } from 'mediabunny'
@@ -287,19 +288,14 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
   const srcH = vTrack.displayHeight
   const videoDuration = await vTrack.computeDuration()
 
-  // Compute output dimensions + where to draw the source frame
-  const rect = computeLetterboxRect(srcW, srcH, options.padTo9x16)
-  const { outW, outH, drawW, drawH, drawX, drawY } = rect
-
-  // Canvas + context
-  const canvas = new OffscreenCanvas(outW, outH)
-  // `alpha: false` + `willReadFrequently: false` keeps the canvas GPU-backed
-  // and avoids a GPU→CPU readback on each frame when copying to VideoFrame
-  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false })
-  if (!ctx) {
-    input.dispose()
-    throw new Error('Failed to get 2D context for OffscreenCanvas')
-  }
+  // Decide whether the frame actually needs compositing. If we're only
+  // transcoding the codec (no 9:16 pad, no burned subtitles), we can feed
+  // decoded frames STRAIGHT into the encoder via VideoSampleSource and skip
+  // the entire 2D-canvas draw + read-back round-trip — that round-trip is
+  // the shared per-frame cost that caps both iPhone and desktop. mediabunny
+  // preserves each sample's display dimensions + rotation, so SAR stays
+  // correct (iOS Photos compatible) without the canvas normalizing it.
+  const needsCompositing = options.padTo9x16 || (options.burnSubtitles && subs.length > 0)
 
   // ---------- Write side ----------
   const output = new Output({
@@ -307,17 +303,38 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
     target: new BufferTarget(),
   })
 
-  const canvasSource = new CanvasSource(canvas, {
-    codec: 'avc',
+  // Shared encoder config for both paths.
+  const encConfig = {
+    codec: 'avc' as const,
     bitrate: QUALITY_HIGH,
-    hardwareAcceleration: 'prefer-hardware',
+    hardwareAcceleration: 'prefer-hardware' as const,
     // Real-time latency mode: encoder prioritizes speed over quality, can drop
     // frames if it gets backed up. Big speedup on iOS VideoToolbox.
-    latencyMode: 'realtime',
-  })
-  // Don't force frameRate: 30 here — let mediabunny use the source's native rate.
-  // Forcing 30 caused re-sampling overhead for 24/60 fps sources.
-  output.addVideoTrack(canvasSource)
+    latencyMode: 'realtime' as const,
+  }
+
+  // Compositing path uses a canvas; passthrough path encodes frames directly.
+  let canvasSource: CanvasSource | null = null
+  let videoSampleSource: VideoSampleSource | null = null
+  let ctx: OffscreenCanvasRenderingContext2D | null = null
+  let rect: DrawRect | null = null
+
+  if (needsCompositing) {
+    rect = computeLetterboxRect(srcW, srcH, options.padTo9x16)
+    const canvas = new OffscreenCanvas(rect.outW, rect.outH)
+    // `alpha: false` + `willReadFrequently: false` keeps the canvas GPU-backed
+    // and avoids a GPU→CPU readback on each frame when copying to VideoFrame
+    ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false })
+    if (!ctx) {
+      input.dispose()
+      throw new Error('Failed to get 2D context for OffscreenCanvas')
+    }
+    canvasSource = new CanvasSource(canvas, encConfig)
+    output.addVideoTrack(canvasSource)
+  } else {
+    videoSampleSource = new VideoSampleSource(encConfig)
+    output.addVideoTrack(videoSampleSource)
+  }
 
   let audioSource: EncodedAudioPacketSource | null = null
   if (aTrack) {
@@ -331,7 +348,7 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
   await output.start()
 
   // ---------- Decode loop ----------
-  options.onProgress(5, 'Processing frames...')
+  options.onProgress(5, needsCompositing ? 'Processing frames...' : 'Transcoding...')
   const vSink = new VideoSampleSink(vTrack)
 
   // Use actual source frame rate (not hardcoded 30) so progress is accurate.
@@ -344,66 +361,71 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
 
   const estimatedTotalFrames = Math.max(1, Math.round(videoDuration * sourceFps))
   let frameIdx = 0
-
-  // Canvas only needs clearing when padding leaves black bars that could ghost
-  const needsClear = options.padTo9x16 && (drawX > 0 || drawY > 0 || drawW < outW || drawH < outH)
-  if (needsClear) {
-    ctx.fillStyle = '#000000'
-    ctx.fillRect(0, 0, outW, outH)
-  }
-
-  // Make sure the font is registered in self.fonts before we start drawing
-  // so ctx.font with "Poppins" actually renders in Poppins (not system fallback).
-  await fontReady
-
   const t0 = performance.now()
-  let tDecode = 0, tDraw = 0, tEncode = 0
 
-  try {
-    for await (const sample of vSink.samples()) {
-      const tA = performance.now()
-
-      // Draw source frame at letterbox position (no need to clear every frame —
-      // the frame itself covers the video area, black bars only change on padding transitions)
-      sample.draw(ctx, drawX, drawY, drawW, drawH)
-
-      // Subtitle overlay
-      if (options.burnSubtitles && subs.length > 0) {
-        const ts = sample.microsecondTimestamp
-        const active = findActiveSubtitle(subs, ts)
-        if (active) {
-          drawSubtitleOnCanvas(ctx, active.text, outW, outH, drawY + drawH, active.style)
+  if (!needsCompositing) {
+    // ---- Fast path: direct frame → encoder, no canvas. ----
+    try {
+      for await (const sample of vSink.samples()) {
+        await videoSampleSource!.add(sample)
+        sample.close()
+        frameIdx++
+        if (frameIdx % 60 === 0) {
+          const pct = Math.min(94, Math.round((frameIdx / estimatedTotalFrames) * 94))
+          const fps = frameIdx / ((performance.now() - t0) / 1000)
+          options.onProgress(pct, `Transcoding ${fps.toFixed(0)} fps`)
         }
       }
-
-      const tB = performance.now()
-
-      // Encode from canvas (mediabunny handles VideoFrame creation + encoder feeding)
-      await canvasSource.add(sample.timestamp, sample.duration)
-
-      const tC = performance.now()
-      tDraw += (tB - tA)
-      tEncode += (tC - tB)
-      tDecode += (tA - (frameIdx === 0 ? t0 : 0))
-
-      // Immediately release the decoded frame
-      sample.close()
-
-      frameIdx++
-      // Progress + yield every 60 frames (was 10 — yielding 28x fewer times)
-      if (frameIdx % 60 === 0) {
-        const pct = Math.min(94, Math.round((frameIdx / estimatedTotalFrames) * 94))
-        const fps = frameIdx / ((performance.now() - t0) / 1000)
-        options.onProgress(pct, `Processing ${fps.toFixed(0)} fps`)
-      }
+    } finally {
+      videoSampleSource!.close()
     }
-  } finally {
-    canvasSource.close()
+  } else {
+    // ---- Compositing path: draw to canvas (+subs), then encode. ----
+    const { outW, outH, drawW, drawH, drawX, drawY } = rect!
+    // Canvas only needs clearing when padding leaves black bars that could ghost
+    const needsClear = options.padTo9x16 && (drawX > 0 || drawY > 0 || drawW < outW || drawH < outH)
+    if (needsClear) {
+      ctx!.fillStyle = '#000000'
+      ctx!.fillRect(0, 0, outW, outH)
+    }
+    // Make sure the font is registered in self.fonts before we start drawing
+    // so ctx.font with "Poppins" actually renders in Poppins (not system fallback).
+    await fontReady
+
+    try {
+      for await (const sample of vSink.samples()) {
+        // Draw source frame at letterbox position (no need to clear every frame —
+        // the frame itself covers the video area, black bars only change on padding transitions)
+        sample.draw(ctx!, drawX, drawY, drawW, drawH)
+
+        // Subtitle overlay
+        if (options.burnSubtitles && subs.length > 0) {
+          const ts = sample.microsecondTimestamp
+          const active = findActiveSubtitle(subs, ts)
+          if (active) {
+            drawSubtitleOnCanvas(ctx!, active.text, outW, outH, drawY + drawH, active.style)
+          }
+        }
+
+        // Encode from canvas (mediabunny handles VideoFrame creation + encoder feeding)
+        await canvasSource!.add(sample.timestamp, sample.duration)
+        sample.close()
+
+        frameIdx++
+        if (frameIdx % 60 === 0) {
+          const pct = Math.min(94, Math.round((frameIdx / estimatedTotalFrames) * 94))
+          const fps = frameIdx / ((performance.now() - t0) / 1000)
+          options.onProgress(pct, `Processing ${fps.toFixed(0)} fps`)
+        }
+      }
+    } finally {
+      canvasSource!.close()
+    }
   }
 
   const totalSec = (performance.now() - t0) / 1000
   const fps = frameIdx / totalSec
-  console.log(`[WebCodecs] Encoded ${frameIdx} frames in ${totalSec.toFixed(1)}s (${fps.toFixed(1)} fps) — draw=${tDraw.toFixed(0)}ms encode=${tEncode.toFixed(0)}ms`)
+  console.log(`[WebCodecs] ${needsCompositing ? 'Composited' : 'Direct-encoded'} ${frameIdx} frames in ${totalSec.toFixed(1)}s (${fps.toFixed(1)} fps)`)
 
   // ---------- Audio passthrough ----------
   if (aTrack && audioSource) {
