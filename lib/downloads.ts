@@ -46,6 +46,41 @@ const TEMP_DIR = path.join(os.tmpdir(), 'grabber-downloads')
 // Cookie file path — written by extension or upload
 const COOKIE_FILE = path.join(TEMP_DIR, 'cookies.txt')
 
+// Minimum free disk to allow a new download. The droplet is only ~8.7GB; a
+// single 4K video can dump 1.5GB of fragments mid-download. If we let the
+// disk hit 100%, unrelated writes silently fail — notably the cookie sync,
+// which then corrupts cookies.txt to 0 bytes and breaks YouTube auth. Bail
+// loudly instead.
+const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024 // 2 GB
+
+// Returns free bytes on the TEMP_DIR filesystem, or null if it can't tell
+// (in which case callers should proceed rather than block).
+function freeDiskBytes(): number | null {
+  try {
+    // fs.statfsSync is available on Node 18.15+. bavail = blocks available to
+    // unprivileged users; bsize = block size.
+    const st = (fs as any).statfsSync?.(TEMP_DIR)
+    if (st && typeof st.bavail === 'number' && typeof st.bsize === 'number') {
+      return st.bavail * st.bsize
+    }
+  } catch {}
+  return null
+}
+
+// Delete every file belonging to a job. yt-dlp names all of a job's outputs
+// (final file + .fNNN fragments + .part + .temp.* leftovers) with the job id
+// prefix, so a prefix sweep catches partial/interrupted downloads too.
+function cleanupJobFiles(id: string) {
+  try {
+    if (!fs.existsSync(TEMP_DIR)) return
+    for (const name of fs.readdirSync(TEMP_DIR)) {
+      if (name.startsWith(`${id}_`)) {
+        try { fs.unlinkSync(path.join(TEMP_DIR, name)) } catch {}
+      }
+    }
+  } catch {}
+}
+
 function cookieArgs(): string[] {
   if (!fs.existsSync(COOKIE_FILE)) return []
   // Defensive: yt-dlp rejects an empty file or one missing the Netscape
@@ -950,6 +985,17 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   }
   downloads.set(id, job)
 
+  // Disk guard — refuse if the droplet is nearly full. Better a clear error
+  // than a download that fills the disk and silently corrupts cookies.txt.
+  const freeBytes = freeDiskBytes()
+  if (freeBytes !== null && freeBytes < MIN_FREE_BYTES) {
+    job.status = 'error'
+    job.error = `Server low on disk (${(freeBytes / 1e9).toFixed(1)}GB free) — try again shortly or pick a lower quality.`
+    notify(job, { type: 'error', message: job.error })
+    console.warn(`[downloads] refused job ${id}: only ${(freeBytes / 1e9).toFixed(2)}GB free`)
+    return job
+  }
+
   const twitter = isTwitterUrl(url)
   const defaultFmt = twitter ? 'b' : 'bestvideo*+bestaudio/best'
 
@@ -998,6 +1044,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         job.status = 'error'
         job.error = 'Stream stalled (90s no progress) — datacenter IP likely blocked. Turn off Skip Desktop or try a different video.'
         notify(job, { type: 'error', message: job.error })
+        cleanupJobFiles(id) // reclaim the stalled download's fragments
       }
     }, 10_000)
 
@@ -1131,6 +1178,10 @@ export function startDownload(id: string, url: string, formatId?: string, title?
             job.status = 'error'
             job.error = lastError || 'Download failed'
             notify(job, { type: 'error', message: job.error })
+            // Immediately reclaim any partial fragments — don't wait for the
+            // 60-min sweeper. A failed 4K download otherwise leaves ~1.5GB
+            // sitting on a tiny disk.
+            cleanupJobFiles(id)
           }
         },
       },
@@ -1187,10 +1238,12 @@ export function cancelDownload(id: string) {
     job.process = undefined
   }
 
-  // 2. Delete the output video file if it exists
+  // 2. Delete the output video file + ALL fragments (.fNNN/.part/.temp.*)
+  //    for this job. A cancelled 4K download leaves big fragments behind.
   if (job.filePath && fs.existsSync(job.filePath)) {
     try { fs.unlinkSync(job.filePath) } catch {}
   }
+  cleanupJobFiles(id)
 
   // 3. Mark cancelled + notify listeners (so polling clients get the signal)
   job.status = 'error'

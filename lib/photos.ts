@@ -98,6 +98,16 @@ export function deletePhotoJob(id: string) {
   photoJobs.delete(id)
 }
 
+function freeDiskBytes(): number | null {
+  try {
+    const st = (fs as any).statfsSync?.(PHOTOS_DIR)
+    if (st && typeof st.bavail === 'number' && typeof st.bsize === 'number') {
+      return st.bavail * st.bsize
+    }
+  } catch {}
+  return null
+}
+
 export function startPhotoJob(id: string, url: string): PhotoJob {
   const jobDir = path.join(PHOTOS_DIR, id)
   if (!fs.existsSync(jobDir)) fs.mkdirSync(jobDir, { recursive: true })
@@ -110,6 +120,14 @@ export function startPhotoJob(id: string, url: string): PhotoJob {
     createdAt: Date.now(),
   }
   photoJobs.set(id, job)
+
+  // Disk guard — same 2GB floor as video downloads.
+  const free = freeDiskBytes()
+  if (free !== null && free < 2 * 1024 * 1024 * 1024) {
+    job.status = 'error'
+    job.error = `Server low on disk (${(free / 1e9).toFixed(1)}GB free) — try again shortly.`
+    return job
+  }
 
   const args = [
     url,
