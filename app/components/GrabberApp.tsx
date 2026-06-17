@@ -71,6 +71,13 @@ function isVideoUrl(text: string): boolean {
   } catch { return false }
 }
 
+// Format a bytes-per-second rate like "10.2 MB/s" / "850 KB/s".
+function formatSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec < 0) return ''
+  if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`
+  return `${Math.max(1, Math.round(bytesPerSec / 1024))} KB/s`
+}
+
 function formatDuration(s: number): string {
   const m = Math.floor(s / 60)
   const sec = Math.floor(s % 60)
@@ -94,6 +101,9 @@ export default function GrabberApp() {
   const autoTriggered = useRef(false)
   const [canShare, setCanShare] = useState(false)
   const [saveProgress, setSaveProgress] = useState<Record<string, number>>({})
+  // Live transfer speed shown during the "Preparing" phase (phone pulling the
+  // finished file from the server), keyed by download id, e.g. "10.2 MB/s".
+  const [saveSpeed, setSaveSpeed] = useState<Record<string, string>>({})
   const fileCache = useRef<Record<string, File>>({})
   // iOS Safari leaks navigator.share state across calls — once a share throws
   // InvalidStateError the state is stuck until the tab reloads. Track whether
@@ -691,13 +701,22 @@ export default function GrabberApp() {
         const reader = res.body.getReader()
         const chunks: BlobPart[] = []
         let received = 0
+        const t0 = performance.now()
+        let lastUi = 0
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
           chunks.push(value)
           received += value.length
-          setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
+          const now = performance.now()
+          if (now - lastUi > 300) {
+            lastUi = now
+            const bps = received / ((now - t0) / 1000)
+            setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
+            setSaveSpeed(prev => ({ ...prev, [id]: formatSpeed(bps) }))
+          }
         }
+        setSaveProgress(prev => ({ ...prev, [id]: 100 }))
         // Hand the chunks straight to Blob — no manual concat. Saves a 2nd
         // full-size copy in memory; iOS Safari OOM-kills the tab around
         // ~250 MB peak, which a 100 MB video could hit with double-buffering.
@@ -748,12 +767,20 @@ export default function GrabberApp() {
         const reader = res.body.getReader()
         const chunks: BlobPart[] = []
         let received = 0
+        const t0 = performance.now()
+        let lastUi = 0
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
           chunks.push(value)
           received += value.length
-          setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
+          const now = performance.now()
+          if (now - lastUi > 300) {
+            lastUi = now
+            const bps = received / ((now - t0) / 1000)
+            setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
+            setSaveSpeed(prev => ({ ...prev, [id]: formatSpeed(bps) }))
+          }
         }
         // Skip manual concat — see prefetchFile for the iOS Safari OOM rationale.
         rawBlob = new Blob(chunks, { type: 'video/mp4' })
@@ -762,6 +789,7 @@ export default function GrabberApp() {
         rawBlob = await res.blob()
       }
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
 
       // Same tiny-file guard as prefetchFile — bail before WebCodecs decodes garbage.
       if (rawBlob.size < 1024) {
@@ -922,6 +950,7 @@ export default function GrabberApp() {
     setError('')
     setDownloads([])
     setSaveProgress({})
+    setSaveSpeed({})
     setFileReady({})
     fileCache.current = {}
     autoTriggered.current = false
@@ -968,6 +997,7 @@ export default function GrabberApp() {
 
     // 3. Clear any per-id progress state
     setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+    setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
     setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
     setFileReady(prev => { const n = { ...prev }; delete n[id]; return n })
     delete fileCache.current[id]
@@ -1558,6 +1588,7 @@ export default function GrabberApp() {
                               <Loader size={14} className="animate-spin text-text-primary" />
                               <span className="text-xs font-medium text-text-primary">
                                 {saveProgress[dl.id] >= 0 ? `Preparing… ${saveProgress[dl.id]}%` : 'Preparing…'}
+                                {saveSpeed[dl.id] ? ` · ${saveSpeed[dl.id]}` : ''}
                               </span>
                             </div>
                           </div>
