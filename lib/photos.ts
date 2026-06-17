@@ -121,9 +121,9 @@ export function startPhotoJob(id: string, url: string): PhotoJob {
   }
   photoJobs.set(id, job)
 
-  // Disk guard — same 2GB floor as video downloads.
+  // Disk guard — same 100MB floor as video downloads (photos are tiny anyway).
   const free = freeDiskBytes()
-  if (free !== null && free < 2 * 1024 * 1024 * 1024) {
+  if (free !== null && free < 100 * 1024 * 1024) {
     job.status = 'error'
     job.error = `Server low on disk (${(free / 1e9).toFixed(1)}GB free) — try again shortly.`
     return job

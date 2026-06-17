@@ -46,12 +46,13 @@ const TEMP_DIR = path.join(os.tmpdir(), 'grabber-downloads')
 // Cookie file path — written by extension or upload
 const COOKIE_FILE = path.join(TEMP_DIR, 'cookies.txt')
 
-// Minimum free disk to allow a new download. The droplet is only ~8.7GB; a
-// single 4K video can dump 1.5GB of fragments mid-download. If we let the
-// disk hit 100%, unrelated writes silently fail — notably the cookie sync,
-// which then corrupts cookies.txt to 0 bytes and breaks YouTube auth. Bail
-// loudly instead.
-const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024 // 2 GB
+// Minimum free disk to allow a new download. Kept low (100MB) because the
+// droplet baselines at only ~1.5GB free (8.7GB disk, mostly OS + a required
+// 2GB swapfile) and would otherwise block normal downloads. This is just a
+// last-ditch floor to avoid a hard 0-bytes disk (which silently corrupts the
+// cookie file); the per-job cleanup + auto-reclaim do the real work of
+// keeping space available.
+const MIN_FREE_BYTES = 100 * 1024 * 1024 // 100 MB
 
 // Returns free bytes on the TEMP_DIR filesystem, or null if it can't tell
 // (in which case callers should proceed rather than block).
