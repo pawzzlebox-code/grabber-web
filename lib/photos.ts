@@ -52,6 +52,60 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000)
 
+// Total bytes used by the photos temp dir (recursive). Scoped to PHOTOS_DIR.
+export function photosDirBytes(): number {
+  let total = 0
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[]
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) walk(full)
+      else { try { total += fs.statSync(full).size } catch {} }
+    }
+  }
+  if (fs.existsSync(PHOTOS_DIR)) walk(PHOTOS_DIR)
+  return total
+}
+
+// Manual reclaim — delete every photo job dir EXCEPT ones still downloading.
+// Scoped strictly to PHOTOS_DIR. Returns bytes freed.
+export function reclaimPhotoSpace(): number {
+  let freed = 0
+  if (!fs.existsSync(PHOTOS_DIR)) return 0
+  const activeIds = new Set<string>()
+  for (const [jid, j] of photoJobs) {
+    if (j.status === 'downloading') activeIds.add(jid)
+  }
+  let entries: string[]
+  try { entries = fs.readdirSync(PHOTOS_DIR) } catch { return 0 }
+  for (const name of entries) {
+    if (activeIds.has(name)) continue // job dir is named by id; keep in-progress
+    const full = path.join(PHOTOS_DIR, name)
+    try {
+      // Sum sizes before removing for the freed total.
+      const sizeOf = (p: string): number => {
+        let s = 0
+        let es: fs.Dirent[]
+        try { es = fs.readdirSync(p, { withFileTypes: true }) } catch { try { return fs.statSync(p).size } catch { return 0 } }
+        for (const e of es) {
+          const fp = path.join(p, e.name)
+          if (e.isDirectory()) s += sizeOf(fp)
+          else { try { s += fs.statSync(fp).size } catch {} }
+        }
+        return s
+      }
+      freed += sizeOf(full)
+      fs.rmSync(full, { recursive: true, force: true })
+    } catch {}
+  }
+  // Drop reclaimed jobs from the registry.
+  for (const [jid, j] of photoJobs) {
+    if (j.status !== 'downloading') photoJobs.delete(jid)
+  }
+  return freed
+}
+
 function isTwitterUrl(url: string): boolean {
   try {
     const host = new URL(url).hostname.replace('www.', '')

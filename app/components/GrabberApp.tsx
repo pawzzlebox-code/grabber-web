@@ -13,7 +13,7 @@ interface VideoInfo {
   title: string
   thumbnail: string
   duration: number
-  formats: { formatId: string; label: string; ext: string }[]
+  formats: { formatId: string; label: string; ext: string; filesize?: number | null }[]
   url: string
   playlistIndex?: number
 }
@@ -154,6 +154,26 @@ export default function GrabberApp() {
   // prefetch effect below.
   const photoCache = useRef<Record<string, File[]>>({})
 
+  // Server disk usage (shown in Settings). grabberBytes = the clearable part
+  // (downloads + photos temp dirs); the rest is OS/swap and can't be touched.
+  const [diskInfo, setDiskInfo] = useState<{ freeBytes: number; totalBytes: number; grabberBytes: number } | null>(null)
+  const [clearingDisk, setClearingDisk] = useState(false)
+  const fetchDiskInfo = useCallback(async () => {
+    try {
+      const r = await fetch('/api/disk', { cache: 'no-store' })
+      const d = await r.json()
+      if (d.available) setDiskInfo({ freeBytes: d.freeBytes, totalBytes: d.totalBytes, grabberBytes: d.grabberBytes })
+    } catch {}
+  }, [])
+  const clearDisk = async () => {
+    setClearingDisk(true)
+    try {
+      const r = await fetch('/api/disk/clear', { method: 'POST', cache: 'no-store' })
+      const d = await r.json()
+      if (d.available) setDiskInfo({ freeBytes: d.freeBytes, totalBytes: d.totalBytes, grabberBytes: d.grabberBytes })
+    } catch {} finally { setClearingDisk(false) }
+  }
+
   useEffect(() => {
     webCodecsProbe.current = isWebCodecsSupported().catch(() => false)
     webCodecsProbe.current.then(setWebCodecsSupported)
@@ -237,6 +257,11 @@ export default function GrabberApp() {
   useEffect(() => {
     setSettings(loadSettings())
   }, [])
+
+  // Refresh server disk usage whenever the Settings panel is opened.
+  useEffect(() => {
+    if (showSettings) fetchDiskInfo()
+  }, [showSettings, fetchDiskInfo])
 
   // Save settings on change
   useEffect(() => {
@@ -480,6 +505,30 @@ export default function GrabberApp() {
       } catch (err: any) {
         setError(err.message || 'Direct download failed')
         return
+      }
+    }
+
+    // Pre-flight disk check — only for droplet-hosted downloads (the desktop
+    // path uses the user's PC disk, which has ample room). Best-effort: many
+    // YouTube formats report no filesize, in which case we skip the check and
+    // rely on the server's floor. ×1.3 accounts for muxing/remux overhead.
+    if (!apiBase()) {
+      const fmt = video.formats.find(f => f.formatId === formatId)
+      const estBytes = fmt?.filesize ? fmt.filesize * 1.3 : 0
+      if (estBytes > 0) {
+        let free = diskInfo?.freeBytes
+        if (free === undefined) {
+          try {
+            const r = await fetch('/api/disk', { cache: 'no-store' })
+            const d = await r.json()
+            if (d.available) { free = d.freeBytes; setDiskInfo({ freeBytes: d.freeBytes, totalBytes: d.totalBytes, grabberBytes: d.grabberBytes }) }
+          } catch {}
+        }
+        if (free !== undefined && estBytes > free) {
+          const gb = (b: number) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`
+          setError(`Not enough server space — need ~${gb(estBytes)}, only ${gb(free)} free. Clear space in Settings or pick a lower quality.`)
+          return
+        }
       }
     }
 
@@ -1061,6 +1110,41 @@ export default function GrabberApp() {
                   ? 'Processing on this device (WebCodecs)'
                   : 'Processing on the Grabber server'}
           </div>
+
+          {/* Server disk usage — sleek bar. The accent segment is the part
+              Clear can free (Grabber downloads/photos); the muted segment is
+              OS/swap and is untouchable. */}
+          {diskInfo && (() => {
+            const { totalBytes, freeBytes, grabberBytes } = diskInfo
+            const fmt = (b: number) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(0, Math.round(b / 1e6))} MB`
+            const used = Math.max(0, totalBytes - freeBytes)
+            const osBytes = Math.max(0, used - grabberBytes)
+            const pct = (b: number) => totalBytes > 0 ? Math.min(100, (b / totalBytes) * 100) : 0
+            return (
+              <div className="pt-3 border-t border-subtle space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-text-secondary">Server disk</p>
+                  <p className="text-xs text-text-muted font-mono">{fmt(freeBytes)} free of {fmt(totalBytes)}</p>
+                </div>
+                <div className="flex h-1.5 w-full rounded-md overflow-hidden bg-surface-2">
+                  <div className="bg-text-muted/50 transition-all duration-300" style={{ width: `${pct(osBytes)}%` }} title="System (not clearable)" />
+                  <div className="bg-accent transition-all duration-300" style={{ width: `${pct(grabberBytes)}%` }} title="Grabber downloads (clearable)" />
+                </div>
+                <button
+                  onClick={clearDisk}
+                  disabled={clearingDisk || grabberBytes < 1024 * 1024}
+                  className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary disabled:text-text-muted disabled:hover:text-text-muted transition-colors"
+                  title="Deletes finished downloads & photos only — never system files"
+                >
+                  {clearingDisk
+                    ? <><Loader size={12} className="animate-spin" /> Clearing…</>
+                    : grabberBytes >= 1024 * 1024
+                      ? <><Trash2 size={12} /> Clear {fmt(grabberBytes)} of downloads</>
+                      : <><Trash2 size={12} /> Nothing to clear</>}
+                </button>
+              </div>
+            )
+          })()}
 
           {/* Advanced — collapsed by default */}
           <button

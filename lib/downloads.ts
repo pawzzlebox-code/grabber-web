@@ -82,11 +82,39 @@ function cleanupJobFiles(id: string) {
   } catch {}
 }
 
+// Bytes used by the downloads temp dir (excluding cookies.txt). Scoped to
+// TEMP_DIR — only counts Grabber's own download files.
+export function downloadsDirBytes(): number {
+  let total = 0
+  try {
+    if (!fs.existsSync(TEMP_DIR)) return 0
+    for (const name of fs.readdirSync(TEMP_DIR)) {
+      if (name === 'cookies.txt') continue
+      try {
+        const st = fs.statSync(path.join(TEMP_DIR, name))
+        if (st.isFile()) total += st.size
+      } catch {}
+    }
+  } catch {}
+  return total
+}
+
+// Whole-filesystem stats for the disk the temp dir lives on.
+export function diskStats(): { totalBytes: number; freeBytes: number } | null {
+  try {
+    const st = (fs as any).statfsSync?.(TEMP_DIR)
+    if (st && typeof st.blocks === 'number' && typeof st.bavail === 'number' && typeof st.bsize === 'number') {
+      return { totalBytes: st.blocks * st.bsize, freeBytes: st.bavail * st.bsize }
+    }
+  } catch {}
+  return null
+}
+
 // Reclaim disk by deleting everything in TEMP_DIR that ISN'T cookies.txt and
 // ISN'T owned by a currently in-progress download. Completed/errored jobs and
 // orphaned fragments (e.g. from a pm2 restart) get swept immediately. Returns
 // the number of bytes freed. Called by the disk guard before it gives up.
-function reclaimDiskSpace(): number {
+export function reclaimDiskSpace(): number {
   let freed = 0
   try {
     if (!fs.existsSync(TEMP_DIR)) return 0
