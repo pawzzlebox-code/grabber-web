@@ -382,9 +382,18 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
   } else {
     // ---- Compositing path: draw to canvas (+subs), then encode. ----
     const { outW, outH, drawW, drawH, drawX, drawY } = rect!
-    // Canvas only needs clearing when padding leaves black bars that could ghost
-    const needsClear = options.padTo9x16 && (drawX > 0 || drawY > 0 || drawW < outW || drawH < outH)
-    if (needsClear) {
+    const subsActive = options.burnSubtitles && subs.length > 0
+    // Letterbox/pillar bars sit OUTSIDE the area the video frame repaints,
+    // so anything drawn there persists across frames. Subtitles are burned
+    // into the bottom bar — if we only clear once, every cue accumulates and
+    // captions stack into clutter. So:
+    //   • bars + subtitles → repaint the whole canvas black EVERY frame
+    //     (the video draw immediately covers the centre; only the bars get
+    //     refreshed, wiping the previous caption + its shadow spill).
+    //   • bars without subtitles → a single clear is enough (static black bars).
+    const hasBars = options.padTo9x16 && (drawX > 0 || drawY > 0 || drawW < outW || drawH < outH)
+    const clearEveryFrame = hasBars && subsActive
+    if (hasBars && !clearEveryFrame) {
       ctx!.fillStyle = '#000000'
       ctx!.fillRect(0, 0, outW, outH)
     }
@@ -394,12 +403,19 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
 
     try {
       for await (const sample of vSink.samples()) {
-        // Draw source frame at letterbox position (no need to clear every frame —
-        // the frame itself covers the video area, black bars only change on padding transitions)
+        // Wipe the bars before each frame when captions live in them, otherwise
+        // old subtitle pixels never get repainted (the video only covers the
+        // centre region).
+        if (clearEveryFrame) {
+          ctx!.fillStyle = '#000000'
+          ctx!.fillRect(0, 0, outW, outH)
+        }
+
+        // Draw source frame at letterbox position.
         sample.draw(ctx!, drawX, drawY, drawW, drawH)
 
         // Subtitle overlay
-        if (options.burnSubtitles && subs.length > 0) {
+        if (subsActive) {
           const ts = sample.microsecondTimestamp
           const active = findActiveSubtitle(subs, ts)
           if (active) {
