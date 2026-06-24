@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
-import { dispatchDownload } from './ytdlp-pool'
+import { dispatchDownload, dispatchExtractInfo } from './ytdlp-pool'
 
 export interface VideoInfo {
   id: string
@@ -341,95 +341,97 @@ function isChannelOrPlaylist(url: string): boolean {
   } catch { return false }
 }
 
+// Short-TTL metadata cache. Clipboard auto-detect + paste/Enter often request
+// the SAME url within seconds; this makes the repeat instant instead of a
+// second extraction.
+const infoCache = new Map<string, { videos: VideoInfo[]; ts: number }>()
+const INFO_CACHE_TTL_MS = 3 * 60 * 1000
+
+function buildVideoInfo(json: any, twitter: boolean, fallbackUrl: string, index?: number): VideoInfo {
+  return {
+    id: json.id,
+    title: json.title || `Video ${index ?? 1}`,
+    thumbnail: json.thumbnail || '',
+    duration: json.duration || 0,
+    formats: buildFormats(json, twitter),
+    url: json.webpage_url || json.url || fallbackUrl,
+    playlistIndex: index,
+  }
+}
+
 export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInfo[]> {
   if (isChannelOrPlaylist(url)) {
     throw new Error('Channel and playlist URLs are not supported. Please paste a link to a specific video.')
   }
 
+  // Serve a fresh-enough cached result instantly.
+  const cached = infoCache.get(url)
+  if (cached && Date.now() - cached.ts < INFO_CACHE_TTL_MS) {
+    return cached.videos
+  }
+
   const twitter = isTwitterUrl(url)
+  // Reuse the same proxy/cookie resolution as downloads; convert the CLI-arg
+  // helpers into the raw values the worker command expects.
+  const proxyA = proxyArgs(url)
+  const proxy = proxyA.length ? proxyA[1] : undefined
+  const cookieA = cookieArgs()
+  const cookies = cookieA.length ? cookieA[1] : undefined
 
   return new Promise((resolve, reject) => {
-    const args = [
-      '--dump-json',
-      '--no-check-formats',
-      '--encoding', 'utf-8',
-      // Fake Chrome's TLS fingerprint via curl-cffi. Bypasses sites that
-      // 410-block yt-dlp's stock Python urllib fingerprint (e.g. Pornhub).
-      '--impersonate', 'chrome',
-      // YouTube's signature/n challenges require an external JS solver
-      // (EJS). Fetched from yt-dlp's official GitHub repo; cached locally
-      // after first use. Without this YouTube returns only storyboards.
-      '--remote-components', 'ejs:github',
-      ...proxyArgs(url),
-      ...cookieArgs(),
-    ]
-    // Only use --no-playlist for non-Twitter URLs
-    if (!twitter) args.unshift('--no-playlist')
-    args.push(url)
+    const jobId = `info-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+    let settled = false
 
-    const proc = spawn('yt-dlp', args, {
-      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
-    })
-
-    let stdout = ''
-    let stderr = ''
-
-    // Timeout after 30 seconds for fetching info
     const timeout = setTimeout(() => {
-      proc.kill()
+      if (settled) return
+      settled = true
+      try { cancel() } catch {}
       reject(new Error('Timed out fetching video info. Check the URL and try again.'))
     }, 30000)
 
-    proc.stdout.on('data', (data: Buffer) => { stdout += data.toString('utf-8') })
-    proc.stderr.on('data', (data: Buffer) => { stderr += data.toString('utf-8') })
-
-    proc.on('close', (code) => {
-      clearTimeout(timeout)
-      if (code !== 0) {
-        console.error('[info] yt-dlp failed (attempt ' + (attempt + 1) + '):', stderr.slice(0, 500))
-        // Retry up to 2 more times for transient errors
-        if (attempt < MAX_RETRIES && isRetryable(stderr)) {
-          console.log(`[info] Retrying (${attempt + 2}/${MAX_RETRIES + 1})...`)
-          setTimeout(() => {
-            fetchVideoInfo(url, attempt + 1).then(resolve).catch(reject)
-          }, RETRY_DELAY_MS * (attempt + 1))
-          return
-        }
-        const errorLine = stderr.split('\n').filter(l => l.includes('ERROR')).pop()
-          || stderr.trim().split('\n').pop() || ''
-        reject(new Error(errorLine.trim() || `yt-dlp exited with code ${code}`))
-        return
-      }
-      try {
-        // yt-dlp outputs one JSON object per line for multi-video
-        // Filter to only JSON lines (skip progress/warning lines)
-        const jsonLines = stdout.trim().split('\n').filter(l => l.trim().startsWith('{'))
-        const videos: VideoInfo[] = []
-
-        for (let i = 0; i < jsonLines.length; i++) {
-          const json = JSON.parse(jsonLines[i])
-          videos.push({
-            id: json.id,
-            title: json.title || `Video ${i + 1}`,
-            thumbnail: json.thumbnail || '',
-            duration: json.duration || 0,
-            formats: buildFormats(json, twitter),
-            url: json.webpage_url || json.url || url,
-            playlistIndex: jsonLines.length > 1 ? i + 1 : undefined,
-          })
-        }
-
-        if (videos.length === 0) {
-          reject(new Error('No videos found'))
-          return
-        }
-
-        resolve(videos)
-      } catch (e: any) {
-        console.error('[info] parse error:', e?.message, 'stdout:', stdout.slice(0, 500))
-        reject(new Error('Failed to parse video info'))
-      }
-    })
+    const cancel = dispatchExtractInfo(
+      { job_id: jobId, url, proxy, cookies, no_playlist: !twitter },
+      {
+        onInfo: (info) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          try {
+            // A playlist/multi-entry result carries `entries`; a single video
+            // is the dict itself. (We pass no_playlist for non-Twitter, so
+            // this is usually a single dict.)
+            const entries: any[] = Array.isArray(info?.entries) ? info.entries.filter(Boolean) : [info]
+            const videos = entries.map((e, i) =>
+              buildVideoInfo(e, twitter, url, entries.length > 1 ? i + 1 : undefined))
+            if (videos.length === 0) {
+              reject(new Error('No videos found'))
+              return
+            }
+            infoCache.set(url, { videos, ts: Date.now() })
+            resolve(videos)
+          } catch (e: any) {
+            console.error('[info] parse error:', e?.message)
+            reject(new Error('Failed to parse video info'))
+          }
+        },
+        onError: (message) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          console.error('[info] extract failed (attempt ' + (attempt + 1) + '):', message.slice(0, 300))
+          if (attempt < MAX_RETRIES && isRetryable(message)) {
+            console.log(`[info] Retrying (${attempt + 2}/${MAX_RETRIES + 1})...`)
+            setTimeout(() => {
+              fetchVideoInfo(url, attempt + 1).then(resolve).catch(reject)
+            }, RETRY_DELAY_MS * (attempt + 1))
+            return
+          }
+          const errorLine = message.split('\n').filter(l => l.includes('ERROR')).pop()
+            || message.trim().split('\n').pop() || ''
+          reject(new Error(errorLine.trim() || 'Failed to fetch video info'))
+        },
+      },
+    )
   })
 }
 

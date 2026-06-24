@@ -109,6 +109,10 @@ def run_download(cmd):
         # Enable YouTube's signature/n challenge solver. Without ejs:github
         # YouTube returns only storyboards for most modern videos.
         'remote_components': ['ejs:github'],
+        # NOTE: we deliberately do NOT pin player_client. yt-dlp's default set
+        # (android_sdkless,web,web_safari) is already the fastest combo that
+        # yields downloadable formats without a PO token — benchmarks showed
+        # pinning to tv/web_safari was slower or broke downloadability.
     }
     if impersonate is not None:
         opts['impersonate'] = impersonate
@@ -143,6 +147,39 @@ def run_download(cmd):
         emit({'type': 'done', 'job_id': ctx.job_id, 'filepath': filepath or ''})
 
 
+def run_extract_info(cmd):
+    """Metadata-only extraction (no download). Runs in the warm worker so it
+    skips the ~0.5-1.5s cold Python+extractor load a fresh CLI spawn pays."""
+    impersonate = None
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        impersonate = ImpersonateTarget(client='chrome')
+    except Exception:
+        pass
+
+    opts = {
+        'noplaylist': cmd.get('no_playlist', True),
+        'check_formats': False,
+        'skip_download': True,
+        'quiet': True,
+        'no_warnings': True,
+        'remote_components': ['ejs:github'],
+        # No player_client pin — default set is fastest (see run_download note).
+    }
+    if impersonate is not None:
+        opts['impersonate'] = impersonate
+    if cmd.get('proxy'):
+        opts['proxy'] = cmd['proxy']
+    if cmd.get('cookies'):
+        opts['cookiefile'] = cmd['cookies']
+
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(cmd['url'], download=False)
+        # sanitize_info strips non-JSON-serializable internals.
+        info = ydl.sanitize_info(info)
+        emit({'type': 'info', 'job_id': cmd.get('job_id'), 'info': info})
+
+
 def main():
     emit({'type': 'ready'})
     for line in sys.stdin:
@@ -158,6 +195,16 @@ def main():
         if ctype == 'download':
             try:
                 run_download(cmd)
+            except Exception as e:
+                emit({
+                    'type': 'error',
+                    'job_id': cmd.get('job_id'),
+                    'message': str(e),
+                    'traceback': traceback.format_exc(),
+                })
+        elif ctype == 'extract_info':
+            try:
+                run_extract_info(cmd)
             except Exception as e:
                 emit({
                     'type': 'error',

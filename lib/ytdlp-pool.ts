@@ -34,8 +34,18 @@ export interface ProgressMsg {
   downloaded_bytes: number
 }
 
+// Metadata-only extraction command (no download). Routed through the same
+// warm worker so it skips the cold Python+extractor startup a CLI spawn pays.
+export interface ExtractInfoCommand {
+  job_id: string
+  url: string
+  proxy?: string
+  cookies?: string
+  no_playlist: boolean
+}
+
 export interface WorkerMsg {
-  type: 'ready' | 'status' | 'progress' | 'done' | 'error' | 'pong'
+  type: 'ready' | 'status' | 'progress' | 'done' | 'error' | 'pong' | 'info'
   job_id?: string | null
   message?: string
   filepath?: string
@@ -45,12 +55,14 @@ export interface WorkerMsg {
   eta?: number
   total_bytes?: number
   downloaded_bytes?: number
+  info?: any
 }
 
 export interface JobCallbacks {
   onStatus?: (message: string) => void
   onProgress?: (p: ProgressMsg) => void
-  onDone: (filepath: string) => void
+  onInfo?: (info: any) => void        // extract_info result
+  onDone?: (filepath: string) => void // download result
   onError: (message: string, traceback?: string) => void
 }
 
@@ -64,7 +76,8 @@ interface PooledWorker {
 }
 
 interface QueuedJob {
-  cmd: DownloadCommand
+  jobId: string
+  wire: string // pre-serialized JSON line to write to the worker's stdin
   cb: JobCallbacks
 }
 
@@ -151,8 +164,12 @@ function handleMessage(w: PooledWorker, msg: WorkerMsg) {
         downloaded_bytes: msg.downloaded_bytes || 0,
       })
       break
+    case 'info':
+      cb.onInfo?.(msg.info)
+      finishJob(w)
+      break
     case 'done':
-      cb.onDone(msg.filepath || '')
+      cb.onDone?.(msg.filepath || '')
       finishJob(w)
       break
     case 'error':
@@ -174,20 +191,45 @@ function drainQueue() {
     const free = workers.find(x => x.ready && !x.busy)
     if (!free) return
     const job = queue.shift()!
-    dispatchTo(free, job.cmd, job.cb)
+    dispatchTo(free, job.jobId, job.wire, job.cb)
   }
 }
 
-function dispatchTo(w: PooledWorker, cmd: DownloadCommand, cb: JobCallbacks) {
+function dispatchTo(w: PooledWorker, jobId: string, wire: string, cb: JobCallbacks) {
   w.busy = true
-  w.currentJobId = cmd.job_id
+  w.currentJobId = jobId
   w.currentCb = cb
-  const payload = JSON.stringify({ type: 'download', ...cmd }) + '\n'
   try {
-    w.proc.stdin.write(payload)
+    w.proc.stdin.write(wire)
   } catch (err: any) {
     cb.onError(`worker stdin write failed: ${err?.message || err}`)
     finishJob(w)
+  }
+}
+
+// Shared enqueue/dispatch for any command type. Returns a cancel function.
+function submit(jobId: string, wire: string, cb: JobCallbacks): () => void {
+  ensureInitialized()
+  const free = workers.find(w => w.ready && !w.busy)
+  if (free) {
+    dispatchTo(free, jobId, wire, cb)
+    return () => {
+      if (free.currentJobId === jobId) {
+        try { free.proc.kill('SIGKILL') } catch {}
+      }
+    }
+  }
+  queue.push({ jobId, wire, cb })
+  return () => {
+    const idx = queue.findIndex(q => q.jobId === jobId)
+    if (idx >= 0) {
+      queue.splice(idx, 1)
+    } else {
+      const assigned = workers.find(w => w.currentJobId === jobId)
+      if (assigned) {
+        try { assigned.proc.kill('SIGKILL') } catch {}
+      }
+    }
   }
 }
 
@@ -207,29 +249,12 @@ function ensureInitialized() {
  * (forcing a respawn) — matches the previous CLI-kill behavior.
  */
 export function dispatchDownload(cmd: DownloadCommand, cb: JobCallbacks): () => void {
-  ensureInitialized()
-  const free = workers.find(w => w.ready && !w.busy)
-  if (free) {
-    dispatchTo(free, cmd, cb)
-    return () => {
-      if (free.currentJobId === cmd.job_id) {
-        try { free.proc.kill('SIGKILL') } catch {}
-      }
-    }
-  }
-  queue.push({ cmd, cb })
-  return () => {
-    const idx = queue.findIndex(q => q.cmd.job_id === cmd.job_id)
-    if (idx >= 0) {
-      queue.splice(idx, 1)
-    } else {
-      // Job already dispatched — find the worker running it and kill it
-      const assigned = workers.find(w => w.currentJobId === cmd.job_id)
-      if (assigned) {
-        try { assigned.proc.kill('SIGKILL') } catch {}
-      }
-    }
-  }
+  return submit(cmd.job_id, JSON.stringify({ type: 'download', ...cmd }) + '\n', cb)
+}
+
+/** Metadata-only extraction through the warm worker. cb.onInfo gets the info. */
+export function dispatchExtractInfo(cmd: ExtractInfoCommand, cb: JobCallbacks): () => void {
+  return submit(cmd.job_id, JSON.stringify({ type: 'extract_info', ...cmd }) + '\n', cb)
 }
 
 export function poolStats() {
