@@ -1602,11 +1602,11 @@ export default function GrabberApp() {
                               <div className="animate-indeterminate bg-accent rounded-md" />
                             )}
                           </div>
-                          <div className="flex gap-3 mt-1.5 text-xs text-text-muted font-mono">
-                            <span>{determinate ? `${label}… ${dl.percent.toFixed(0)}%` : `${label}…`}</span>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
+                            <span className="text-text-secondary">{determinate ? `${label}… ${dl.percent.toFixed(0)}%` : `${label}…`}</span>
                             {dl.totalSize && <span>{dl.totalSize}</span>}
                             {dl.speed && <span>{dl.speed}</span>}
-                            {dl.eta && <span>ETA {dl.eta}</span>}
+                            {dl.eta && <span className="whitespace-nowrap">ETA {dl.eta}</span>}
                           </div>
                         </>
                       )
