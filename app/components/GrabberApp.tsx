@@ -976,6 +976,33 @@ export default function GrabberApp() {
     setDownloads(prev => prev.filter(d => d.id !== id))
   }
 
+  // Tapping the Build number asks whichever backend is doing the work (the
+  // droplet when Skip Desktop is on, else the desktop) to print a full
+  // diagnostic block — jobs, errors, Python tracebacks, proxy, pool, disk —
+  // to ITS terminal. Also mirrors the snapshot into the on-page debug panel
+  // and the browser console so it's visible without terminal access.
+  const dumpServerDebug = async () => {
+    const stamp = new Date().toLocaleTimeString()
+    setDebugLogs(prev => [...prev.slice(-80), `[${stamp}] Build tapped → requesting server diagnostic dump (${apiBase() || 'droplet'})...`])
+    try {
+      const res = await fetch(`${apiBase()}/api/debug`, { method: 'POST', cache: 'no-store', headers: apiHeaders(false) })
+      if (!res.ok) {
+        setDebugLogs(prev => [...prev.slice(-80), `[${stamp}] debug dump failed: HTTP ${res.status} (no /api/debug on this backend?)`])
+        return
+      }
+      const snap = await res.json()
+      console.log('[debug] server snapshot:', snap)
+      const failed = (snap.jobs || []).filter((j: any) => j.status === 'error')
+      setDebugLogs(prev => [
+        ...prev.slice(-80),
+        `[${stamp}] dumped to server terminal — proxy=${snap.env?.proxyUrl || 'NONE'} pool=${JSON.stringify(snap.pool)} jobs=${snap.jobCount}`,
+        ...failed.map((j: any) => `[${stamp}]   FAILED ${j.url} → ${j.error || 'unknown'}`),
+      ])
+    } catch (err: any) {
+      setDebugLogs(prev => [...prev.slice(-80), `[${stamp}] debug dump error: ${err?.message || err}`])
+    }
+  }
+
   const handleCancelDownload = async (id: string) => {
     setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Cancelling ${id}`])
 
@@ -1025,7 +1052,7 @@ export default function GrabberApp() {
           <h1 className="text-base font-semibold text-text-primary">Grabber</h1>
         </div>
         <div className="text-center">
-          <span onClick={() => setShowDebug(s => !s)} className="text-xs text-text-muted cursor-pointer hover:text-text-secondary transition-colors px-3 py-1">
+          <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="text-xs text-text-muted cursor-pointer hover:text-text-secondary transition-colors px-3 py-1">
             Build 49
           </span>
         </div>

@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
-import { dispatchDownload, dispatchExtractInfo } from './ytdlp-pool'
+import { dispatchDownload, dispatchExtractInfo, poolStats } from './ytdlp-pool'
 
 export interface VideoInfo {
   id: string
@@ -38,6 +38,19 @@ export interface DownloadJob {
   // finishes. The client uses this to decide whether to run WebCodecs
   // for iOS-compat transcoding — much faster than the droplet's CPU.
   sourceCodec?: string
+  // --- Diagnostics (surfaced by the Build-number debug dump) ---
+  // The Python traceback from the worker on the last failure, if any.
+  traceback?: string
+  // Per-attempt context: what we actually handed yt-dlp. Lets the terminal
+  // dump answer "did it use the proxy? which format? cookies?" at a glance.
+  debugInfo?: {
+    url: string
+    format: string
+    proxy?: string
+    cookies: boolean
+    attempts: number
+    lastErrorAt?: number
+  }
 }
 
 const downloads = new Map<string, DownloadJob>()
@@ -276,6 +289,63 @@ export function deleteDownload(id: string) {
 
 export function getAllDownloads(): DownloadJob[] {
   return Array.from(downloads.values()).map(({ process, listeners, ...rest }) => rest as any)
+}
+
+// Full diagnostic snapshot — dumped to the server terminal (and returned to
+// the client) when the user taps the Build number. Captures everything needed
+// to diagnose a geo-block / stall / format failure without SSHing in.
+export function getDebugSnapshot() {
+  const now = Date.now()
+  const jobs = Array.from(downloads.values()).map((j) => ({
+    id: j.id,
+    url: j.url,
+    status: j.status,
+    percent: j.percent,
+    speed: j.speed,
+    totalSize: j.totalSize,
+    error: j.error,
+    ageSec: Math.round((now - j.createdAt) / 1000),
+    debugInfo: j.debugInfo,
+    traceback: j.traceback,
+    recentLogs: j.logs.slice(-25),
+  }))
+  return {
+    serverTime: new Date(now).toISOString(),
+    env: {
+      proxyUrl: process.env.PROXY_URL || null,
+      ytdlpPoolSize: process.env.YTDLP_POOL_SIZE || '2 (default)',
+      groqConfigured: !!process.env.GROQ_API_KEY,
+    },
+    pool: poolStats(),
+    disk: diskStats(),
+    jobCount: jobs.length,
+    jobs,
+  }
+}
+
+// Pretty-print the snapshot to stdout so it lands in `pm2 logs` / the terminal
+// running the server. Called by the /api/debug route on a Build-number tap.
+export function dumpDebugToTerminal(): ReturnType<typeof getDebugSnapshot> {
+  const snap = getDebugSnapshot()
+  console.error('\n[debug] ████████ BUILD-TAP DIAGNOSTIC DUMP ████████')
+  console.error(`[debug] time=${snap.serverTime}  proxy=${snap.env.proxyUrl || 'NONE'}  pool=${JSON.stringify(snap.pool)}`)
+  if (snap.disk) {
+    console.error(`[debug] disk: ${(snap.disk.freeBytes / 1e9).toFixed(2)}GB free of ${(snap.disk.totalBytes / 1e9).toFixed(2)}GB`)
+  }
+  if (snap.jobs.length === 0) {
+    console.error('[debug] no jobs in registry (nothing downloaded recently)')
+  }
+  for (const j of snap.jobs) {
+    console.error(`\n[debug] ── job ${j.id} ──`)
+    console.error(`[debug]   url=${j.url}`)
+    console.error(`[debug]   status=${j.status} percent=${j.percent}% size=${j.totalSize || '?'} age=${j.ageSec}s`)
+    console.error(`[debug]   format=${j.debugInfo?.format || '?'} proxy=${j.debugInfo?.proxy || 'NONE'} cookies=${j.debugInfo?.cookies ? 'yes' : 'no'} attempts=${j.debugInfo?.attempts ?? '?'}`)
+    if (j.error) console.error(`[debug]   error=${j.error}`)
+    if (j.traceback) console.error(`[debug]   traceback:\n${j.traceback}`)
+    if (j.recentLogs.length) console.error(`[debug]   recentLogs:\n${j.recentLogs.join('\n')}`)
+  }
+  console.error('[debug] ████████ END DIAGNOSTIC DUMP ████████\n')
+  return snap
 }
 
 function notify(job: DownloadJob, data: any) {
@@ -1102,6 +1172,17 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     const fallbackFmt = "bv*[vcodec~='^(avc|h264)']+ba/b[vcodec~='^(avc|h264)']/bv*+ba/b"
     const activeFormat = useFallbackFormat ? fallbackFmt : (formatId || defaultFmt)
 
+    // Stash what we're about to hand yt-dlp so the Build-number debug dump can
+    // answer "did it use the proxy / which format / cookies?" after a failure.
+    job.debugInfo = {
+      url,
+      format: activeFormat,
+      proxy,
+      cookies: !!cookies,
+      attempts: attempt + 1,
+    }
+    console.log(`[debug] job ${id} attempt ${attempt + 1}/${MAX_RETRIES + 1} → format="${activeFormat}" proxy=${proxy || 'none'} cookies=${cookies ? 'yes' : 'no'} url=${url}`)
+
     // Stall detector: if no progress event fires within 90s, the stream
     // fetch is almost certainly being throttled/RSTed by YouTube/CDN.
     // Kill the worker and surface a clear error rather than letting the
@@ -1117,6 +1198,16 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         }
         job.status = 'error'
         job.error = 'Stream stalled (90s no progress) — datacenter IP likely blocked. Turn off Skip Desktop or try a different video.'
+        if (job.debugInfo) job.debugInfo.lastErrorAt = Date.now()
+        console.error(
+          `\n[debug] ===== job ${id} STALLED (90s no progress) =====\n` +
+          `  url:     ${url}\n` +
+          `  format:  ${activeFormat}\n` +
+          `  proxy:   ${proxy || 'NONE (direct from this server IP)'}\n` +
+          `  reached: ${job.percent}%  ${job.totalSize || ''}\n` +
+          `  hint:    no bytes for 90s — the CDN is likely throttling/RSTing this exit IP.\n` +
+          `[debug] ===============================================\n`,
+        )
         notify(job, { type: 'error', message: job.error })
         cleanupJobFiles(id) // reclaim the stalled download's fragments
       }
@@ -1233,7 +1324,22 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           clearInterval(stallTimer)
           job.cancel = undefined
           lastError = message
-          if (traceback) console.error('[ytdlp-pool trace]', traceback)
+          job.traceback = traceback
+          if (job.debugInfo) job.debugInfo.lastErrorAt = Date.now()
+          // Always dump a structured failure block to the terminal — this is
+          // what the Build-number tap surfaces. Includes the full context so
+          // a geo-block ("HTTP 403", "not available in your country") is
+          // distinguishable from a format/stall/cookie problem.
+          console.error(
+            `\n[debug] ===== job ${id} ERROR (attempt ${attempt + 1}) =====\n` +
+            `  url:     ${url}\n` +
+            `  format:  ${activeFormat}\n` +
+            `  proxy:   ${proxy || 'NONE (direct from this server IP)'}\n` +
+            `  cookies: ${cookies ? cookies : 'none'}\n` +
+            `  error:   ${message}\n` +
+            (traceback ? `  traceback:\n${traceback}\n` : '') +
+            `[debug] ============================================\n`,
+          )
           // Stale formatId — immediately retry with the resilient
           // H.264-preferred chain instead of using a retry slot.
           if (!useFallbackFormat && /Requested format is not available/i.test(message)) {
