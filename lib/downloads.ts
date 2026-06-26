@@ -187,6 +187,10 @@ function proxyArgs(url?: string): string[] {
         'twitter.com', 'x.com', 't.co',
         'instagram.com',
         'youtube.com', 'youtu.be', 'm.youtube.com',
+        // Pornhub downloads HLS via curl_cffi impersonation, which crashes
+        // (SIGABRT / "double free") when forced through the SOCKS5 WARP proxy.
+        // It works cleanly direct from the droplet's own IP, so bypass it.
+        'pornhub.com', 'phncdn.com',
       ]
       if (bypassHosts.some(h => host === h || host.endsWith('.' + h))) return []
     } catch {}
@@ -1156,6 +1160,9 @@ export function startDownload(id: string, url: string, formatId?: string, title?
     'twitter.com', 'x.com', 't.co',
     'instagram.com',
     'youtube.com', 'youtu.be', 'm.youtube.com',
+    // See proxyArgs(): Pornhub's curl_cffi HLS download SIGABRTs through the
+    // SOCKS5 WARP proxy but works direct from the droplet IP.
+    'pornhub.com', 'phncdn.com',
   ]
   const proxyBypassed = !!hostname && bypassHosts.some(h => hostname === h || hostname.endsWith('.' + h))
   const proxy = process.env.PROXY_URL && !proxyBypassed ? process.env.PROXY_URL : undefined
