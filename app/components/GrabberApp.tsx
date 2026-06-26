@@ -44,6 +44,13 @@ interface DownloadJob {
 // won't configure it, and direct download joins it there.
 const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '', skipDesktop: false, photoMode: false }
 
+// Above this size we never buffer the file into a JS Blob (for navigator.share
+// / WebCodecs). Holding a few hundred MB in a tab OOM-crashes the renderer —
+// iOS Safari dies near ~250MB, and even desktop tabs crash on multi-GB files
+// (a 26-min 7Mbps video is ~1.3GB). Large files stream straight to disk via an
+// <a download> instead, which uses ~no memory.
+const MAX_INMEMORY_BYTES = 100 * 1024 * 1024 // 100 MB
+
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
   try {
@@ -651,12 +658,20 @@ export default function GrabberApp() {
             } else if (isTwitter) {
               setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] twitter source — re-encoding on device via WebCodecs for iOS Photos`])
             }
-            if (useInstant) {
+            const fileBytes = state.fileSize || 0
+            const tooBigForMemory = fileBytes > MAX_INMEMORY_BYTES
+            if (tooBigForMemory) {
+              setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] File is ${(fileBytes / 1048576).toFixed(0)}MB (> ${MAX_INMEMORY_BYTES / 1048576}MB) — downloading directly to disk instead of buffering in memory`])
+            }
+            if (useInstant && !tooBigForMemory) {
               // Instant mode: fetch raw video, process on-device with WebCodecs.
               prefetchAndProcess(data.id, state.fileName, state.srt || '', settings.verticalPad, settings.burnSubtitles)
-            } else if (typeof navigator !== 'undefined' && 'share' in navigator) {
+            } else if (!tooBigForMemory && typeof navigator !== 'undefined' && 'share' in navigator) {
               prefetchFile(data.id, state.fileName)
             } else {
+              // Large file (or no share support): stream straight to disk via an
+              // <a download>. Buffering a 400MB+/1GB+ file into a JS Blob (for
+              // share/WebCodecs) OOM-crashes the tab — white flash + reload.
               triggerFileDownload(data.id, state.fileName)
             }
           }
@@ -695,6 +710,17 @@ export default function GrabberApp() {
       const res = await fetch(fileUrl, { headers: apiHeaders(false) })
       const contentLength = res.headers.get('content-length')
       const total = contentLength ? parseInt(contentLength, 10) : 0
+
+      // Safety net: never buffer a large file into memory (OOM-crashes the
+      // tab). If it's over the limit, abandon the stream and hand off to a
+      // plain <a download> that writes straight to disk. Covers the manual
+      // "Save to Photos" tap and any retry, not just the auto path above.
+      if (total > MAX_INMEMORY_BYTES) {
+        try { await res.body?.cancel() } catch {}
+        setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+        triggerFileDownload(id, fileName)
+        return
+      }
 
       let blob: Blob
       if (total && res.body) {
