@@ -98,13 +98,15 @@ def run_download(cmd):
         'noplaylist': cmd.get('no_playlist', True),
         'check_formats': False,
         'updatetime': False,
-        # Tiny droplet (512MB RAM, ~7MB free): download ONE fragment at a time
-        # with small chunks. Running 8 concurrent curl_cffi(+SOCKS5) fragment
-        # fetches under memory pressure was corrupting the heap and aborting the
-        # worker with SIGABRT ("double free or corruption"). Serializing trades
-        # some speed for not crashing mid-download.
-        'concurrent_fragment_downloads': 1,
-        'http_chunk_size': 1 * 1024 * 1024,
+        # Droplet now has 1GB RAM (~490MB free). Download 4 fragments in
+        # parallel with 4MB chunks — much faster on HLS/DASH (hides per-fragment
+        # latency) while staying well within memory. We previously had to
+        # serialize to 1 fragment on the 512MB box because 8 concurrent
+        # curl_cffi(+SOCKS5) fetches under memory pressure corrupted the heap
+        # (SIGABRT). 4 is a safe middle ground; the proxy-heavy crash path is
+        # also avoided now that flaky sites bypass the proxy entirely.
+        'concurrent_fragment_downloads': 4,
+        'http_chunk_size': 4 * 1024 * 1024,
         'retries': 3,
         'fragment_retries': 5,
         'quiet': True,
