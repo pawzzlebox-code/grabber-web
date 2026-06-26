@@ -98,11 +98,21 @@ def run_download(cmd):
         'noplaylist': cmd.get('no_playlist', True),
         'check_formats': False,
         'updatetime': False,
-        'concurrent_fragment_downloads': 8,
-        'http_chunk_size': 10 * 1024 * 1024,
+        # Tiny droplet (512MB RAM, ~7MB free): download ONE fragment at a time
+        # with small chunks. Running 8 concurrent curl_cffi(+SOCKS5) fragment
+        # fetches under memory pressure was corrupting the heap and aborting the
+        # worker with SIGABRT ("double free or corruption"). Serializing trades
+        # some speed for not crashing mid-download.
+        'concurrent_fragment_downloads': 1,
+        'http_chunk_size': 1 * 1024 * 1024,
         'retries': 3,
         'fragment_retries': 5,
         'quiet': True,
+        # Suppress yt-dlp's built-in "[download] 45%..." progress bar. It was
+        # being written to the worker's stdout and concatenated onto our JSON
+        # protocol lines, so every progress message failed to parse ("bad
+        # line") on the Node side. We report progress via progress_hooks only.
+        'noprogress': True,
         'no_warnings': False,
         'progress_hooks': [make_progress_hook(ctx)],
         'post_hooks': [make_post_hook(ctx)],
