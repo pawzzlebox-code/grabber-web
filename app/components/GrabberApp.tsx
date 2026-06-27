@@ -49,7 +49,7 @@ const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, 
 // iOS Safari dies near ~250MB, and even desktop tabs crash on multi-GB files
 // (a 26-min 7Mbps video is ~1.3GB). Large files stream straight to disk via an
 // <a download> instead, which uses ~no memory.
-const MAX_INMEMORY_BYTES = 100 * 1024 * 1024 // 100 MB
+const MAX_INMEMORY_BYTES = 450 * 1024 * 1024 // 450 MB
 
 function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
