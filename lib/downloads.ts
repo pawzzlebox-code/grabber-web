@@ -389,7 +389,9 @@ function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
       const fmtId = twitter
         ? `b[height<=${f.height}]`
         : `bestvideo[height<=${f.height}]+bestaudio/best[height<=${f.height}]`
-      formats.push({ formatId: fmtId, label: key, ext: f.ext || 'mp4', filesize: f.filesize || undefined })
+      // HLS/DASH formats usually report filesize_approx (not filesize), so
+      // fall back to it — otherwise the size never shows on the picker button.
+      formats.push({ formatId: fmtId, label: key, ext: f.ext || 'mp4', filesize: f.filesize || f.filesize_approx || undefined })
     }
   }
 

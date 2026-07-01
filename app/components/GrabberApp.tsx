@@ -95,6 +95,42 @@ function formatDuration(s: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`
 }
 
+// Compact byte size for the format-picker buttons, e.g. "402 MB" / "1.3 GB".
+function formatSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return ''
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  return `${Math.round(bytes / 1024 ** 2)} MB`
+}
+
+// Fire a short device vibration (download start / done). Works on Android +
+// desktop with a vibration motor; iOS Safari doesn't support the Vibration
+// API, so it's a harmless no-op there.
+function haptic(pattern: number | number[]) {
+  try { navigator.vibrate?.(pattern) } catch {}
+}
+
+// Circular progress ring overlaid on a download's thumbnail. Determinate when
+// percent > 0, otherwise a gentle indeterminate spin.
+function ProgressRing({ percent, size = 26, stroke = 3 }: { percent: number; size?: number; stroke?: number }) {
+  const r = (size - stroke) / 2
+  const circ = 2 * Math.PI * r
+  const pct = Math.min(100, Math.max(0, percent))
+  const determinate = pct > 0
+  const offset = circ - (pct / 100) * circ
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className={`-rotate-90 ${determinate ? '' : 'animate-spin'}`}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth={stroke} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r} fill="none"
+        className="text-accent transition-[stroke-dashoffset] duration-300"
+        stroke="currentColor" strokeWidth={stroke} strokeLinecap="round"
+        strokeDasharray={circ}
+        strokeDashoffset={determinate ? offset : circ * 0.75}
+      />
+    </svg>
+  )
+}
+
 export default function GrabberApp() {
   const [url, setUrl] = useState('')
   const [videos, setVideos] = useState<VideoInfo[]>([])
@@ -501,6 +537,7 @@ export default function GrabberApp() {
   }, [desktopTunnelUrl, settings.desktopKey, settings.photoMode, startPhotoJob])
 
   const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string) => {
+    haptic(10) // light tap on download start (Android/desktop; no-op on iOS)
     // Direct download mode: browser fetches from source URL
     if (settings.directDownload) {
       try {
@@ -678,6 +715,8 @@ export default function GrabberApp() {
 
           if (state.status === 'done' || state.status === 'error') {
             stopped = true
+            // Buzz on finish: a short double-tap for success, a longer one for error.
+            haptic(state.status === 'done' ? [15, 40, 15] : [60, 40, 60])
             console.log('[poll] Terminal state reached, stopping')
             return
           }
@@ -1365,11 +1404,18 @@ export default function GrabberApp() {
             {videos.map((video, idx) => (
               <div key={video.id} className="bg-surface border border-subtle rounded-lg overflow-hidden animate-fade-in">
                 {video.thumbnail && (
-                  <img
-                    src={video.thumbnail}
-                    alt=""
-                    className="w-full h-44 object-cover"
-                  />
+                  <div className="relative">
+                    <img
+                      src={video.thumbnail}
+                      alt=""
+                      className="w-full h-44 object-cover"
+                    />
+                    {video.duration > 0 && (
+                      <span className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/75 text-white text-[11px] font-semibold tabular-nums leading-none">
+                        {formatDuration(video.duration)}
+                      </span>
+                    )}
+                  </div>
                 )}
                 <div className="p-4 space-y-4">
                   <div>
@@ -1377,7 +1423,8 @@ export default function GrabberApp() {
                       {videos.length > 1 && <span className="text-accent mr-1.5">#{idx + 1}</span>}
                       {video.title}
                     </h3>
-                    {video.duration > 0 && (
+                    {/* Duration shows as a pill on the thumbnail; fall back to text only when there's no thumbnail. */}
+                    {video.duration > 0 && !video.thumbnail && (
                       <p className="text-xs font-normal text-text-muted mt-1">{formatDuration(video.duration)}</p>
                     )}
                   </div>
@@ -1399,6 +1446,7 @@ export default function GrabberApp() {
                               }`}
                             >
                               {f.label}
+                              {f.filesize ? <span className="ml-1 opacity-60">· {formatSize(f.filesize)}</span> : null}
                             </button>
                           )
                         })}
@@ -1541,13 +1589,21 @@ export default function GrabberApp() {
               >
                 <div className="flex gap-3 items-center">
                   {dl.thumbnail && (
-                    <img src={dl.thumbnail} alt="" className="w-14 h-10 object-cover rounded-sm flex-shrink-0" />
+                    <div className="relative w-14 h-10 flex-shrink-0">
+                      <img src={dl.thumbnail} alt="" className="w-14 h-10 object-cover rounded-sm" />
+                      {active && (
+                        <div className="absolute inset-0 grid place-items-center rounded-sm bg-black/55">
+                          <ProgressRing percent={dl.percent} />
+                        </div>
+                      )}
+                    </div>
                   )}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-start justify-between gap-2">
                       <p className="text-sm font-medium text-text-primary line-clamp-2">{dl.title}</p>
                       <div className="flex items-center gap-0.5 flex-shrink-0">
-                        {active && (
+                        {/* Spinner only when there's no thumbnail — otherwise the thumbnail ring shows progress. */}
+                        {active && !dl.thumbnail && (
                           <span className="h-8 w-8 grid place-items-center">
                             <Loader size={16} className="animate-spin text-accent" />
                           </span>
