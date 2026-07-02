@@ -29,6 +29,15 @@ body {
   background: var(--bg-base);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Fixed-width digits app-wide so live numbers (percent, speed, ETA)
+     don't make text wiggle as they update. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Press feedback — every enabled button dips slightly while held, so taps
+   feel acknowledged on touch screens where hover doesn't exist. */
+button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 /* Custom scrollbar */
@@ -67,4 +76,21 @@ body {
   top: 0;
   bottom: 0;
   animation: indeterminate 1.4s ease-in-out infinite;
+}
+
+/* Settings bottom sheet — slides up from the bottom edge; backdrop fades in. */
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.animate-sheet-up {
+  animation: sheet-up 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-backdrop-in {
+  animation: backdrop-in 0.2s ease-out;
 }

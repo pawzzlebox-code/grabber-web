@@ -1130,9 +1130,21 @@ export default function GrabberApp() {
         </button>
       </header>
 
-      {/* Settings panel — slim 4-toggle default + Advanced disclosure */}
+      {/* Settings — bottom sheet: slides up over the page like a native app
+          instead of shoving the content down. Tap the dimmed backdrop (or the
+          gear again) to close. */}
       {showSettings && (
-        <div className="border-b border-subtle bg-surface px-4 py-4 space-y-4 animate-fade-in">
+        <div className="fixed inset-0 z-50">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-backdrop-in"
+            onClick={() => setShowSettings(false)}
+          />
+          <div
+            className="absolute bottom-0 inset-x-0 mx-auto w-full max-w-lg bg-surface border-t border-subtle rounded-t-lg max-h-[85vh] overflow-y-auto overscroll-contain px-4 pt-2 space-y-4 animate-sheet-up"
+            style={{ paddingBottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
+          >
+          {/* Grab handle — signals "this is a sheet" */}
+          <div className="mx-auto h-1 w-9 rounded-full bg-surface-2" />
           <div className="flex items-center justify-between">
             <p className="text-xs uppercase tracking-wider text-text-muted">Settings</p>
             <button
@@ -1310,6 +1322,7 @@ export default function GrabberApp() {
               </p>
             </div>
           )}
+          </div>
         </div>
       )}
 
@@ -1363,11 +1376,12 @@ export default function GrabberApp() {
             </button>
           </div>
           <div className="flex gap-2">
-            {/* Fetch — SECONDARY action: ghost/outline */}
+            {/* Fetch — PRIMARY action: the first thing a visitor taps, so it
+                gets the solid accent treatment. */}
             <button
               onClick={() => fetchInfo(url)}
               disabled={!url.trim() || loading}
-              className="flex-1 h-10 px-4 bg-transparent border border-accent rounded-md text-sm font-medium text-accent hover:bg-accent-muted active:bg-accent-muted disabled:border-subtle disabled:text-text-muted disabled:hover:bg-transparent transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              className="flex-1 h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white disabled:bg-surface-2 disabled:text-text-muted transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
               {loading ? <Loader size={16} className="animate-spin" /> : <Download size={16} />}
               {loading ? 'Fetching…' : 'Fetch Video'}
