@@ -1421,13 +1421,15 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   return job
 }
 
+// Decimal units with a space ("17 MB", "1.3 GB") — matches the quality-pill
+// sizes everywhere in the UI. True conversion (1000-based), not MiB relabeled.
 function formatBytes(bytes: number): string {
   if (!bytes) return ''
-  const units = ['B', 'KiB', 'MiB', 'GiB']
+  const units = ['B', 'KB', 'MB', 'GB']
   let v = bytes
   let i = 0
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
-  return `${v.toFixed(v >= 10 ? 0 : 1)}${units[i]}`
+  while (v >= 1000 && i < units.length - 1) { v /= 1000; i++ }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`
 }
 
 function formatSpeed(bps: number): string {

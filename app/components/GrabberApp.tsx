@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  ClipboardPaste, Download, Loader, CheckCircle, AlertCircle,
+  ClipboardPaste, Download, Loader, AlertCircle,
   X, Zap, Settings, ChevronDown, Trash2, RefreshCw
 } from 'lucide-react'
 import { isWebCodecsSupported } from '@/lib/webcodecs-processor'
@@ -98,10 +98,12 @@ function formatDuration(s: number): string {
 }
 
 // Compact byte size for the format-picker buttons, e.g. "402 MB" / "1.3 GB".
+// True decimal conversion (1000-based) so "MB" means MB — matches the
+// server's formatBytes used in the download cards.
 function formatSize(bytes?: number): string {
   if (!bytes || bytes <= 0) return ''
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
-  return `${Math.round(bytes / 1024 ** 2)} MB`
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`
+  return `${Math.round(bytes / 1e6)} MB`
 }
 
 // Fire a short device vibration (download start / done). Works on Android +
@@ -1691,7 +1693,9 @@ export default function GrabberApp() {
                   )}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-start justify-between gap-2">
-                      <p className="text-sm font-medium text-text-primary line-clamp-2">{dl.title}</p>
+                      {/* Receipt, not headline — match the result card's demoted
+                          title treatment, single line. */}
+                      <p className="text-sm font-normal text-text-secondary truncate">{dl.title}</p>
                       <div className="flex items-center gap-0.5 flex-shrink-0">
                         {/* Spinner only when there's no thumbnail — otherwise the thumbnail ring shows progress. */}
                         {active && !dl.thumbnail && (
@@ -1731,10 +1735,12 @@ export default function GrabberApp() {
                       </div>
                     </div>
 
+                    {/* "Downloaded", not "Saved" — at this point the file is only
+                        fetched (server + browser memory); nothing persists to the
+                        device until the user taps Share / Save file. */}
                     {dl.status === 'done' && !busy ? (
-                      <p className="text-xs text-text-secondary mt-0.5 flex items-center gap-1">
-                        <CheckCircle size={12} className="text-success flex-shrink-0" />
-                        <span>Ready · {dl.formatLabel}{dl.totalSize ? ` · ${dl.totalSize}` : ''}</span>
+                      <p className="text-xs text-text-secondary mt-0.5">
+                        Downloaded · {dl.formatLabel}{dl.totalSize ? ` · ${dl.totalSize}` : ''}
                       </p>
                     ) : (
                       <p className="text-xs text-text-muted mt-0.5">{dl.formatLabel}</p>
