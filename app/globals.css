@@ -40,6 +40,16 @@ button:active:not(:disabled) {
   transform: scale(0.97);
 }
 
+/* Respect the user's motion preference: collapse all animations and
+   transitions to effectively instant. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -13,9 +13,11 @@ interface VideoInfo {
   title: string
   thumbnail: string
   duration: number
-  formats: { formatId: string; label: string; ext: string; filesize?: number | null }[]
+  formats: { formatId: string; label: string; ext: string; filesize?: number | null; best?: boolean }[]
   url: string
   playlistIndex?: number
+  uploader?: string
+  uploadDate?: string // YYYYMMDD
 }
 
 interface DownloadJob {
@@ -107,6 +109,23 @@ function formatSize(bytes?: number): string {
 // API, so it's a harmless no-op there.
 function haptic(pattern: number | number[]) {
   try { navigator.vibrate?.(pattern) } catch {}
+}
+
+// iOS/iPadOS detection — "Save to Photos" is iOS vocabulary; other platforms
+// get a neutral "Share". (iPadOS 13+ masquerades as Mac, hence the touch check.)
+function isIOS(): boolean {
+  if (typeof navigator === 'undefined') return false
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+}
+
+// yt-dlp upload_date (YYYYMMDD) → "Mar 12, 2026". Empty string on bad input.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+function formatUploadDate(d?: string): string {
+  if (!d || !/^\d{8}$/.test(d)) return ''
+  const m = parseInt(d.slice(4, 6), 10)
+  if (m < 1 || m > 12) return ''
+  return `${MONTHS[m - 1]} ${parseInt(d.slice(6, 8), 10)}, ${d.slice(0, 4)}`
 }
 
 // Circular progress ring overlaid on a download's thumbnail. Determinate when
@@ -1392,7 +1411,8 @@ export default function GrabberApp() {
             <button
               onClick={handlePaste}
               className="h-10 w-10 grid place-items-center bg-surface-2 border border-subtle rounded-md text-text-secondary hover:text-text-primary active:bg-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-              title="Paste from clipboard"
+              title="Paste link"
+              aria-label="Paste link"
             >
               <ClipboardPaste size={18} />
             </button>
@@ -1413,7 +1433,8 @@ export default function GrabberApp() {
               onClick={handleReload}
               disabled={loading}
               className="h-10 w-10 grid place-items-center bg-surface-2 border border-subtle rounded-md text-text-secondary hover:text-text-primary active:bg-surface disabled:opacity-40 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-              title="Clear & paste new link"
+              title="Start over — clear & paste new link"
+              aria-label="Start over — clear and paste new link"
             >
               <RefreshCw size={18} />
             </button>
@@ -1428,6 +1449,24 @@ export default function GrabberApp() {
             <button onClick={() => setError('')} className="h-8 w-8 grid place-items-center rounded-md text-danger/60 hover:text-danger hover:bg-danger/10 transition-colors" title="Dismiss">
               <X size={14} />
             </button>
+          </div>
+        )}
+
+        {/* Skeleton while fetching — a ghost of the result card so the wait
+            reads as progress instead of a frozen page. */}
+        {loading && videos.length === 0 && (
+          <div className="bg-surface border border-subtle rounded-lg overflow-hidden animate-fade-in" aria-hidden>
+            <div className="w-full h-44 bg-surface-2 animate-pulse" />
+            <div className="p-4 space-y-3">
+              <div className="h-3.5 w-2/5 bg-surface-2 rounded animate-pulse" />
+              <div className="h-4 w-4/5 bg-surface-2 rounded animate-pulse" />
+              <div className="flex gap-2">
+                <div className="h-8 w-28 bg-surface-2 rounded-md animate-pulse" />
+                <div className="h-8 w-24 bg-surface-2 rounded-md animate-pulse" />
+                <div className="h-8 w-24 bg-surface-2 rounded-md animate-pulse" />
+              </div>
+              <div className="h-10 w-full bg-surface-2 rounded-md animate-pulse" />
+            </div>
           </div>
         )}
 
@@ -1454,15 +1493,26 @@ export default function GrabberApp() {
                   </div>
                 )}
                 <div className="p-4 space-y-4">
-                  <div>
-                    <h3 className="text-base font-semibold text-text-primary line-clamp-2">
-                      {videos.length > 1 && <span className="text-accent mr-1.5">#{idx + 1}</span>}
+                  <div className="space-y-1">
+                    {/* Metadata row — the fastest way to confirm you grabbed the
+                        right post: author + date (duration lives on the thumbnail
+                        pill; it only appears here when there's no thumbnail). */}
+                    {(video.uploader || formatUploadDate(video.uploadDate) || (video.duration > 0 && !video.thumbnail)) && (
+                      <p className="text-sm font-medium text-text-primary flex flex-wrap items-center gap-x-1.5">
+                        {videos.length > 1 && <span className="text-accent">#{idx + 1}</span>}
+                        {video.uploader && <span>{video.uploader}</span>}
+                        {formatUploadDate(video.uploadDate) && (
+                          <><span className="text-text-muted">·</span><span className="text-text-secondary font-normal">{formatUploadDate(video.uploadDate)}</span></>
+                        )}
+                        {video.duration > 0 && !video.thumbnail && (
+                          <><span className="text-text-muted">·</span><span className="text-text-secondary font-normal">{formatDuration(video.duration)}</span></>
+                        )}
+                      </p>
+                    )}
+                    <h3 className={`line-clamp-2 ${video.uploader ? 'text-sm font-normal text-text-secondary' : 'text-base font-semibold text-text-primary'}`}>
+                      {videos.length > 1 && !video.uploader && <span className="text-accent mr-1.5">#{idx + 1}</span>}
                       {video.title}
                     </h3>
-                    {/* Duration shows as a pill on the thumbnail; fall back to text only when there's no thumbnail. */}
-                    {video.duration > 0 && !video.thumbnail && (
-                      <p className="text-xs font-normal text-text-muted mt-1">{formatDuration(video.duration)}</p>
-                    )}
                   </div>
 
                   {/* Format selector */}
@@ -1483,6 +1533,9 @@ export default function GrabberApp() {
                             >
                               {f.label}
                               {f.filesize ? <span className="ml-1 opacity-60">· {formatSize(f.filesize)}</span> : null}
+                              {f.best && f.label !== 'Best Quality' ? (
+                                <span className={`ml-1.5 text-[10px] font-semibold uppercase tracking-wide ${selected ? 'text-accent' : 'text-text-muted'}`}>Best</span>
+                              ) : null}
                             </button>
                           )
                         })}
@@ -1590,10 +1643,10 @@ export default function GrabberApp() {
                 {job.status === 'done' && job.ready && (
                   <button
                     onClick={() => handlePhotoSaveAll(job)}
-                    className="w-full h-10 px-4 bg-success hover:brightness-110 rounded-md text-sm font-semibold text-white transition-all flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-success/50"
+                    className="w-full h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                   >
                     <Download size={16} />
-                    Save all {job.files.length} to Photos
+                    {isIOS() ? `Save all ${job.files.length} to Photos` : `Share all ${job.files.length}`}
                   </button>
                 )}
               </div>
@@ -1611,7 +1664,7 @@ export default function GrabberApp() {
               {downloads.some(d => d.status === 'done' || d.status === 'error') && (
                 <button
                   onClick={() => setDownloads(prev => prev.filter(d => d.status !== 'done' && d.status !== 'error'))}
-                  className="text-xs text-text-muted hover:text-text-secondary transition-colors"
+                  className="text-xs text-text-secondary hover:text-text-primary hover:underline transition-colors"
                 >
                   Clear completed
                 </button>
@@ -1627,11 +1680,11 @@ export default function GrabberApp() {
               >
                 <div className="flex gap-3 items-center">
                   {dl.thumbnail && (
-                    <div className="relative w-14 h-10 flex-shrink-0">
-                      <img src={dl.thumbnail} alt="" className="w-14 h-10 object-cover rounded-sm" />
+                    <div className="relative w-16 h-9 flex-shrink-0">
+                      <img src={dl.thumbnail} alt="" className="w-16 h-9 object-cover rounded-sm" />
                       {active && (
                         <div className="absolute inset-0 grid place-items-center rounded-sm bg-black/55">
-                          <ProgressRing percent={dl.percent} />
+                          <ProgressRing percent={dl.percent} size={22} />
                         </div>
                       )}
                     </div>
@@ -1646,11 +1699,8 @@ export default function GrabberApp() {
                             <Loader size={16} className="animate-spin text-accent" />
                           </span>
                         )}
-                        {dl.status === 'done' && !busy && (
-                          <span className="h-8 w-8 grid place-items-center" title="Completed">
-                            <CheckCircle size={16} className="text-success" />
-                          </span>
-                        )}
+                        {/* Done state is shown inline in the status line below —
+                            no corner icon, so the card has one clear signal. */}
                         {dl.status === 'error' && (
                           <span className="h-8 w-8 grid place-items-center" title="Failed">
                             <AlertCircle size={16} className="text-danger" />
@@ -1681,7 +1731,14 @@ export default function GrabberApp() {
                       </div>
                     </div>
 
-                    <p className="text-xs text-text-muted mt-0.5">{dl.formatLabel}</p>
+                    {dl.status === 'done' && !busy ? (
+                      <p className="text-xs text-text-secondary mt-0.5 flex items-center gap-1">
+                        <CheckCircle size={12} className="text-success flex-shrink-0" />
+                        <span>Ready · {dl.formatLabel}{dl.totalSize ? ` · ${dl.totalSize}` : ''}</span>
+                      </p>
+                    ) : (
+                      <p className="text-xs text-text-muted mt-0.5">{dl.formatLabel}</p>
+                    )}
 
                     {active && (() => {
                       const label = dl.status === 'converting' ? 'Converting'
@@ -1746,25 +1803,30 @@ export default function GrabberApp() {
                               onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
                               className="w-full h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                             >
-                              Download to Files
+                              Save file
                             </button>
                             <p className="text-xs text-text-muted text-center">
                               File too large for Save to Photos — saves to Files app instead
                             </p>
                           </div>
                         ) : canShare && fileReady[dl.id] ? (
+                          // One primary action (blue family — green is reserved for
+                          // the done indicator), file export demoted to an icon.
+                          // "Save to Photos" is iOS vocabulary; elsewhere say Share.
                           <div className="flex gap-2">
                             <button
                               onClick={() => handleSaveToPhotos(dl.id, dl.fileName || 'download')}
-                              className="flex-1 h-10 px-4 bg-success hover:brightness-110 rounded-md text-sm font-semibold text-white transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-success/50"
+                              className="flex-1 h-10 px-4 bg-transparent border border-accent text-accent hover:bg-accent-muted rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                             >
-                              Save to Photos
+                              {isIOS() ? 'Save to Photos' : 'Share'}
                             </button>
                             <button
                               onClick={() => handleDirectDownload(dl.id, dl.fileName || 'download')}
-                              className="flex-1 h-10 px-4 bg-surface-2 border border-subtle hover:text-text-primary text-text-secondary rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                              className="h-10 w-10 grid place-items-center bg-surface-2 border border-subtle rounded-md text-text-secondary hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                              title="Save file"
+                              aria-label="Save file"
                             >
-                              Download
+                              <Download size={16} />
                             </button>
                           </div>
                         ) : canShare && !fileReady[dl.id] ? (
@@ -1777,9 +1839,9 @@ export default function GrabberApp() {
                         ) : (
                           <button
                             onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
-                            className="w-full h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                            className="w-full h-10 px-4 bg-transparent border border-accent text-accent hover:bg-accent-muted rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                           >
-                            Download Again
+                            Save file
                           </button>
                         )}
                       </div>

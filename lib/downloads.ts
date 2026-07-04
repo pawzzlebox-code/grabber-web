@@ -9,9 +9,14 @@ export interface VideoInfo {
   title: string
   thumbnail: string
   duration: number
-  formats: { formatId: string; label: string; ext: string; filesize?: number }[]
+  // `best` marks the top pill — highest resolution, downloaded via the
+  // resilient best-chain rather than a height cap.
+  formats: { formatId: string; label: string; ext: string; filesize?: number; best?: boolean }[]
   url: string
   playlistIndex?: number
+  // Author + publish date for the metadata row (e.g. "@AbsoluteBruno · Mar 12").
+  uploader?: string
+  uploadDate?: string // yt-dlp upload_date, YYYYMMDD
 }
 
 export interface DownloadJob {
@@ -370,13 +375,23 @@ function isTwitterUrl(url: string): boolean {
   } catch { return false }
 }
 
+// Display-normalize odd encoder rungs (538p → 540p) while keeping the real
+// height in the format selector. Snaps to a standard rung when within 5%,
+// otherwise rounds to the nearest 10.
+const STD_HEIGHTS = [144, 240, 360, 480, 540, 720, 1080, 1440, 2160, 4320]
+function displayHeight(h: number): string {
+  for (const s of STD_HEIGHTS) {
+    if (Math.abs(h - s) / s <= 0.05) return `${s}p`
+  }
+  return `${Math.round(h / 10) * 10}p`
+}
+
 function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
   const seen = new Set<string>()
   const formats: VideoInfo['formats'] = []
 
   // Best quality — use 'b' for Twitter (pre-merged MP4s), broader fallback for others
   const bestFormat = twitter ? 'b' : 'bestvideo*+bestaudio/best'
-  formats.push({ formatId: bestFormat, label: 'Best Quality', ext: 'mp4', filesize: undefined })
 
   const videoFormats = (json.formats || [])
     .filter((f: any) => f.vcodec !== 'none' && f.height)
@@ -395,8 +410,18 @@ function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
         : `bestvideo[height<=${f.height}]+bestaudio/best[height<=${f.height}]`
       // HLS/DASH formats usually report filesize_approx (not filesize), so
       // fall back to it — otherwise the size never shows on the picker button.
-      formats.push({ formatId: fmtId, label: key, ext: f.ext || 'mp4', filesize: f.filesize || f.filesize_approx || undefined })
+      formats.push({ formatId: fmtId, label: displayHeight(f.height), ext: f.ext || 'mp4', filesize: f.filesize || f.filesize_approx || undefined })
     }
+  }
+
+  if (formats.length > 0) {
+    // Top pill IS the best quality: tag it and use the resilient best-chain
+    // (no height cap) so it never fails on a stale height. One taxonomy —
+    // every pill is a resolution; no separate judgment-labeled pill.
+    formats[0] = { ...formats[0], formatId: bestFormat, best: true }
+  } else {
+    // No parseable heights (rare) — fall back to a single generic pill.
+    formats.push({ formatId: bestFormat, label: 'Best Quality', ext: 'mp4', filesize: undefined, best: true })
   }
 
   if (!twitter) {
@@ -428,6 +453,13 @@ const infoCache = new Map<string, { videos: VideoInfo[]; ts: number }>()
 const INFO_CACHE_TTL_MS = 3 * 60 * 1000
 
 function buildVideoInfo(json: any, twitter: boolean, fallbackUrl: string, index?: number): VideoInfo {
+  // Prefer the handle (uploader_id) over the display name — it's what users
+  // check to confirm they grabbed the right post. @ only prefixes real
+  // handles; display names (which can contain spaces) pass through as-is.
+  const handle = json.uploader_id
+    ? (String(json.uploader_id).startsWith('@') ? String(json.uploader_id) : `@${json.uploader_id}`)
+    : null
+  const uploader = handle || json.uploader || json.channel || undefined
   return {
     id: json.id,
     title: json.title || `Video ${index ?? 1}`,
@@ -436,6 +468,8 @@ function buildVideoInfo(json: any, twitter: boolean, fallbackUrl: string, index?
     formats: buildFormats(json, twitter),
     url: json.webpage_url || json.url || fallbackUrl,
     playlistIndex: index,
+    uploader,
+    uploadDate: json.upload_date || undefined,
   }
 }
 
