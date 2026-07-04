@@ -316,6 +316,20 @@ export default function GrabberApp() {
     if (showSettings) fetchDiskInfo()
   }, [showSettings, fetchDiskInfo])
 
+  // While the settings sheet is open: lock the page behind it (otherwise
+  // scrolling the sheet also scrolls the homepage) and close on Escape.
+  useEffect(() => {
+    if (!showSettings) return
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowSettings(false) }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = prevOverflow
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [showSettings])
+
   // Save settings on change
   useEffect(() => {
     saveSettings(settings)
@@ -744,9 +758,15 @@ export default function GrabberApp() {
   const prefetchFile = async (id: string, fileName: string) => {
     const fileUrl = `${apiBase()}/api/file/${id}`
     const name = fileName || 'video.mp4'
+    // Register an abort handle so the X button actually stops the transfer —
+    // without this, cancelling during "Preparing…" only updated the card while
+    // the fetch kept pulling the whole file in the background.
+    const ac = new AbortController()
+    const existing = cancelHandles.current[id] || { stop: () => {} }
+    cancelHandles.current[id] = { ...existing, abort: ac }
     try {
       setSaveProgress(prev => ({ ...prev, [id]: 0 }))
-      const res = await fetch(fileUrl, { headers: apiHeaders(false) })
+      const res = await fetch(fileUrl, { headers: apiHeaders(false), signal: ac.signal })
       const contentLength = res.headers.get('content-length')
       const total = contentLength ? parseInt(contentLength, 10) : 0
 
@@ -803,10 +823,12 @@ export default function GrabberApp() {
       const mime = ext === 'webm' ? 'video/webm' : 'video/mp4'
       fileCache.current[id] = new File([blob], name, { type: mime })
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
       setFileReady(prev => ({ ...prev, [id]: true }))
     } catch {
-      // Prefetch failed — clear progress, user can tap to retry
+      // Prefetch failed or was cancelled — clear progress, user can tap to retry
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
     }
   }
 
@@ -1118,7 +1140,7 @@ export default function GrabberApp() {
         </div>
         <div className="text-center">
           <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="text-xs text-text-muted cursor-pointer hover:text-text-secondary transition-colors px-3 py-1">
-            Build 49
+            Build {process.env.NEXT_PUBLIC_BUILD || 'dev'}
           </span>
         </div>
         <button
@@ -1363,7 +1385,7 @@ export default function GrabberApp() {
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && fetchInfo(url)}
-              placeholder="Paste video URL..."
+              placeholder={settings.photoMode ? 'Paste photo or post URL...' : 'Paste video URL...'}
               className="flex-1 h-10 bg-surface border border-subtle rounded-sm px-4 text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent transition-colors"
             />
             {/* Paste — ghost icon button */}
@@ -1384,7 +1406,7 @@ export default function GrabberApp() {
               className="flex-1 h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white disabled:bg-surface-2 disabled:text-text-muted transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
               {loading ? <Loader size={16} className="animate-spin" /> : <Download size={16} />}
-              {loading ? 'Fetching…' : 'Fetch Video'}
+              {loading ? 'Fetching…' : settings.photoMode ? 'Fetch Photos' : 'Fetch Video'}
             </button>
             {/* Reload — ghost icon button */}
             <button
@@ -1584,9 +1606,11 @@ export default function GrabberApp() {
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-medium text-text-secondary uppercase tracking-wider">Downloads</h3>
-              {downloads.some(d => d.status !== 'downloading') && (
+              {/* Only terminal jobs are clearable — converting/subtitling are
+                  still active work, not "completed". */}
+              {downloads.some(d => d.status === 'done' || d.status === 'error') && (
                 <button
-                  onClick={() => setDownloads(prev => prev.filter(d => d.status === 'downloading'))}
+                  onClick={() => setDownloads(prev => prev.filter(d => d.status !== 'done' && d.status !== 'error'))}
                   className="text-xs text-text-muted hover:text-text-secondary transition-colors"
                 >
                   Clear completed
@@ -1775,8 +1799,14 @@ export default function GrabberApp() {
         {videos.length === 0 && !loading && downloads.length === 0 && (
           <div className="text-center py-12 text-text-muted">
             <Download size={40} strokeWidth={1} className="mx-auto mb-3" />
-            <p className="text-sm text-text-secondary">Paste a video URL to get started</p>
-            <p className="text-xs mt-1">Works with YouTube, TikTok, Instagram, and 1800+ sites</p>
+            <p className="text-sm text-text-secondary">
+              {settings.photoMode ? 'Paste a photo or post URL to get started' : 'Paste a video URL to get started'}
+            </p>
+            <p className="text-xs mt-1">
+              {settings.photoMode
+                ? 'Photos mode is on — grabs images & carousels'
+                : 'Works with YouTube, TikTok, Instagram, and 1800+ sites'}
+            </p>
             {settings.autoDetect && (
               <p className="text-xs mt-3 text-accent/70">
                 Clipboard auto-detection is on
