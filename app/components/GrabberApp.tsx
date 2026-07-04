@@ -1527,16 +1527,18 @@ export default function GrabberApp() {
                             <button
                               key={f.formatId}
                               onClick={() => setSelectedFormats(prev => ({ ...prev, [video.id]: f.formatId }))}
-                              className={`px-3 h-8 rounded-md text-xs font-medium border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+                              className={`px-3 h-8 rounded-md text-xs border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
                                 selected
-                                  ? 'bg-accent-muted text-accent border-accent'
-                                  : 'bg-surface-2 text-text-secondary border-subtle hover:text-text-primary'
+                                  ? 'bg-accent border-accent text-black/90 font-semibold'
+                                  : 'bg-surface-2 text-text-secondary border-subtle font-medium hover:text-text-primary'
                               }`}
                             >
                               {f.label}
-                              {f.filesize ? <span className="ml-1 opacity-60">· {formatSize(f.filesize)}</span> : null}
+                              {/* Two-tone hierarchy in both states: bright resolution,
+                                  muted size — on the filled pill that's black at ~70%. */}
+                              {f.filesize ? <span className={`ml-1 font-normal ${selected ? 'text-black/70' : 'opacity-60'}`}>· {formatSize(f.filesize)}</span> : null}
                               {f.best && f.label !== 'Best Quality' ? (
-                                <span className={`ml-1.5 text-[10px] font-semibold uppercase tracking-wide ${selected ? 'text-accent' : 'text-text-muted'}`}>Best</span>
+                                <span className={`ml-1.5 text-[10px] font-semibold uppercase tracking-wide ${selected ? 'text-black/60' : 'text-text-muted'}`}>Best</span>
                               ) : null}
                             </button>
                           )
@@ -1680,7 +1682,7 @@ export default function GrabberApp() {
                 key={dl.id}
                 className="bg-surface border border-subtle rounded-lg p-3 animate-fade-in"
               >
-                <div className="flex gap-3 items-center">
+                <div className="flex gap-3 items-start">
                   {dl.thumbnail && (
                     <div className="relative w-16 h-9 flex-shrink-0">
                       <img src={dl.thumbnail} alt="" className="w-16 h-9 object-cover rounded-sm" />
@@ -1696,7 +1698,9 @@ export default function GrabberApp() {
                       {/* Receipt, not headline — match the result card's demoted
                           title treatment, single line. */}
                       <p className="text-sm font-normal text-text-secondary truncate">{dl.title}</p>
-                      <div className="flex items-center gap-0.5 flex-shrink-0">
+                      {/* mr-1 lines this 32px control's center up with the 40px
+                          icon button at the card's right edge below. */}
+                      <div className="flex items-start gap-0.5 flex-shrink-0 mr-1">
                         {/* Spinner only when there's no thumbnail — otherwise the thumbnail ring shows progress. */}
                         {active && !dl.thumbnail && (
                           <span className="h-8 w-8 grid place-items-center">
@@ -1739,11 +1743,11 @@ export default function GrabberApp() {
                         fetched (server + browser memory); nothing persists to the
                         device until the user taps Share / Save file. */}
                     {dl.status === 'done' && !busy ? (
-                      <p className="text-xs text-text-secondary mt-0.5">
+                      <p className="text-xs text-text-secondary mt-1">
                         Downloaded · {dl.formatLabel}{dl.totalSize ? ` · ${dl.totalSize}` : ''}
                       </p>
                     ) : (
-                      <p className="text-xs text-text-muted mt-0.5">{dl.formatLabel}</p>
+                      <p className="text-xs text-text-muted mt-1">{dl.formatLabel}</p>
                     )}
 
                     {active && (() => {
@@ -1769,8 +1773,16 @@ export default function GrabberApp() {
                       )
                     })()}
 
-                    {dl.status === 'done' && (
-                      <div className="mt-2">
+                    {dl.status === 'error' && dl.error && (
+                      <p className="mt-1 text-xs text-danger">{dl.error}</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Action area sits OUTSIDE the thumbnail row — full card width,
+                    12px below the status line. */}
+                {dl.status === 'done' && (
+                  <div className="mt-3">
                         {instantProgress[dl.id] ? (
                           // On-device processing — accent determinate bar.
                           <div className="relative w-full h-9 bg-surface-2 rounded-md overflow-hidden">
@@ -1850,14 +1862,8 @@ export default function GrabberApp() {
                             Save file
                           </button>
                         )}
-                      </div>
-                    )}
-
-                    {dl.status === 'error' && dl.error && (
-                      <p className="mt-1 text-xs text-danger">{dl.error}</p>
-                    )}
                   </div>
-                </div>
+                )}
               </div>
             )})}
           </div>
