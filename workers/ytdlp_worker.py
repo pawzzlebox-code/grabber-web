@@ -95,6 +95,13 @@ def run_download(cmd):
     opts = {
         'outtmpl': {'default': cmd['outtmpl']},
         'format': cmd.get('format') or 'bestvideo*+bestaudio/best',
+        # Prefer H.264 video + AAC audio when the site offers them (YouTube
+        # keeps H.264 copies of everything up to 1080p). H.264+AAC needs NO
+        # client-side transcode for iOS Photos — the 10+ minute WebCodecs
+        # re-encode simply never runs. This is a soft preference, not a
+        # filter: sites without H.264 fall back to their best codec exactly
+        # as before. Composes with the height caps in the format strings.
+        'format_sort': ['vcodec:h264', 'acodec:aac'],
         'noplaylist': cmd.get('no_playlist', True),
         'check_formats': False,
         'updatetime': False,

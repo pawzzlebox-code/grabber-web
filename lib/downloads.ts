@@ -380,7 +380,11 @@ function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
 
   const videoFormats = (json.formats || [])
     .filter((f: any) => f.vcodec !== 'none' && f.height)
-    .sort((a: any, b: any) => (b.height || 0) - (a.height || 0))
+    // Height desc, and within a height put H.264 (avc1) first — the worker's
+    // format_sort will download the H.264 copy when one exists, so the size
+    // shown on the picker button should be the H.264 variant's size.
+    .sort((a: any, b: any) => (b.height || 0) - (a.height || 0)
+      || Number(String(b.vcodec || '').startsWith('avc')) - Number(String(a.vcodec || '').startsWith('avc')))
 
   for (const f of videoFormats) {
     const key = `${f.height}p`
