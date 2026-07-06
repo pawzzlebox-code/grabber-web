@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ClipboardPaste, Download, Loader, AlertCircle,
-  X, Zap, Settings, ChevronDown, Trash2, RefreshCw
+  X, Settings, ChevronDown, Trash2, RefreshCw
 } from 'lucide-react'
 import { isWebCodecsSupported } from '@/lib/webcodecs-processor'
 import { runWorker } from '@/lib/webcodecs-client'
@@ -1230,11 +1230,14 @@ export default function GrabberApp() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col items-center sm:px-4 sm:py-6">
+      {/* App shell — the whole app lives in a molded slate box centered on
+          the black page (full-bleed on phones, boxed from sm: up). */}
+      <div className="app-shell w-full max-w-lg flex-1 flex flex-col overflow-hidden">
       {/* Toolbar — beveled console strip: tappable Build tag (debug panel),
           live clock, raised Settings button. Build lives here because
           iPhone's home indicator was getting in the way of tapping it. */}
-      <header className="max-w-lg mx-auto w-full px-3 pt-3">
+      <header className="w-full px-3 pt-3">
         <div className="toolbar flex items-center justify-between gap-2 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-primary">
           <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="cursor-pointer hover:text-danger transition-colors py-1.5">
             Build {process.env.NEXT_PUBLIC_BUILD || 'dev'}
@@ -1288,10 +1291,7 @@ export default function GrabberApp() {
 
           <div className="flex items-center justify-between">
             <div>
-              <div className="flex items-center gap-1.5">
-                <Zap size={14} className="text-accent" />
-                <p className="text-sm font-medium text-text-primary">Auto best quality</p>
-              </div>
+              <p className="text-sm font-medium text-text-primary">Auto best quality</p>
               <p className="text-xs text-text-muted">Instantly downloads best quality when URL is detected</p>
             </div>
             <label className="relative inline-flex cursor-pointer">
@@ -1473,7 +1473,7 @@ export default function GrabberApp() {
       )}
 
       {/* Main content */}
-      <main className="flex-1 px-4 py-5 max-w-lg mx-auto w-full space-y-4">
+      <main className="flex-1 px-4 py-5 w-full space-y-4">
         {/* Hero — pixel wordmark + tagline */}
         <div className="text-center pb-1">
           <PixelWordmark />
@@ -1986,6 +1986,7 @@ export default function GrabberApp() {
           </pre>
         </div>
       )}
+      </div>
 
     </div>
   )

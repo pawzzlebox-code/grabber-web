@@ -14,14 +14,15 @@
    ------------------------------------------------------------------------- */
 :root {
   /* Color */
-  --bg-base: #5d6880;        /* slate ground */
+  --bg-base: #08090b;        /* page ground — near-black room around the shell */
+  --shell-ground: #5d6880;   /* slate inside the app shell */
   --bg-surface: #939baa;     /* grey panels / cards */
   --bg-surface-2: #b9bdc6;   /* raised controls, nested surfaces */
   --border-subtle: #363b46;  /* dark outline — structure comes from bevels */
 
   --text-primary: #22262e;   /* ink on grey */
-  --text-secondary: #3d4452;
-  --text-muted: #4d5464;
+  --text-secondary: #363d4b;
+  --text-muted: #3d4452;
 
   --accent: #2f6cb8;         /* console blue — dark enough for text on grey */
   --accent-hover: #275c9e;
@@ -60,6 +61,23 @@ button:active:not(:disabled) {
 }
 
 /* ── Component classes ────────────────────────────────────────────────── */
+
+/* The app shell — slate console screen centered on the black page. Full
+   bleed on phones; from sm: up it becomes a molded box with breathing
+   room around it. */
+.app-shell {
+  background: var(--shell-ground);
+}
+@media (min-width: 640px) {
+  .app-shell {
+    border: 3px solid var(--lo);
+    border-radius: 12px;
+    box-shadow:
+      inset 2px 2px 0 rgba(255, 255, 255, 0.16),
+      inset -2px -2px 0 rgba(0, 0, 0, 0.28),
+      0 24px 70px rgba(0, 0, 0, 0.75);
+  }
+}
 
 /* Molded grey panel — cards, sheets, modals. */
 .panel {
