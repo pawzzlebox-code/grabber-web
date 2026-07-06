@@ -143,94 +143,13 @@ function ProgressRing({ percent, size = 26, stroke = 3 }: { percent: number; siz
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth={stroke} />
       <circle
         cx={size / 2} cy={size / 2} r={r} fill="none"
-        className="text-[#7fc4f2] transition-[stroke-dashoffset] duration-300"
+        className="text-accent transition-[stroke-dashoffset] duration-300"
         stroke="currentColor" strokeWidth={stroke} strokeLinecap="round"
         strokeDasharray={circ}
         strokeDashoffset={determinate ? offset : circ * 0.75}
       />
     </svg>
   )
-}
-
-// 5×7 bitmap glyphs for the hero wordmark — drawn on canvas so the pixels
-// stay hard-edged at any DPR (a webfont would anti-alias).
-const WORDMARK_GLYPHS: Record<string, string[]> = {
-  G: ['01110', '10001', '10000', '10111', '10001', '10001', '01110'],
-  R: ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
-  A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
-  B: ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
-  E: ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
-}
-
-// GRABBER wordmark in the console-logo style: two-tone blue pixel letters
-// with a hard dark shadow, followed by three red/yellow/green slashes.
-function PixelWordmark() {
-  const ref = useRef<HTMLCanvasElement>(null)
-  useEffect(() => {
-    const cv = ref.current
-    if (!cv) return
-    const word = 'GRABBER'
-    const s = 5, gap = 1, shadow = 1
-    const wordCols = word.length * (5 + gap) - gap
-    const slashCols = 3 * 3 + 6
-    const cols = wordCols + 2 + slashCols + shadow
-    const rows = 7 + shadow + 1
-    const dpr = 2
-    cv.width = cols * s * dpr
-    cv.height = rows * s * dpr
-    cv.style.width = `${cols * s}px`
-    cv.style.height = `${rows * s}px`
-    const ctx = cv.getContext('2d')
-    if (!ctx) return
-    ctx.scale(dpr, dpr)
-
-    const drawWord = (ox: number, oy: number, fill: (row: number) => string) => {
-      let x0 = ox
-      for (const ch of word) {
-        const glyph = WORDMARK_GLYPHS[ch]
-        for (let r = 0; r < 7; r++)
-          for (let c = 0; c < 5; c++)
-            if (glyph[r][c] === '1') {
-              ctx.fillStyle = fill(r)
-              ctx.fillRect((x0 + c) * s, (oy + r) * s, s, s)
-            }
-        x0 += 5 + gap
-      }
-    }
-    const drawSlashes = (ox: number, oy: number, color?: string) => {
-      const colors = ['#d94f5c', '#e0bd4a', '#4fc455']
-      for (let i = 0; i < 3; i++) {
-        ctx.fillStyle = color ?? colors[i]
-        for (let r = 0; r < 7; r++) {
-          ctx.fillRect((ox + i * 3 + (6 - r)) * s, (oy + r) * s, 2 * s, s)
-        }
-      }
-    }
-    drawWord(shadow, shadow, () => '#22262e')
-    drawSlashes(wordCols + 2 + shadow, shadow, '#22262e')
-    drawWord(0, 0, (r) => (r < 4 ? '#7fc4f2' : '#4c8fd9'))
-    drawSlashes(wordCols + 2, 0)
-  }, [])
-  return <canvas ref={ref} className="mx-auto" style={{ imageRendering: 'pixelated' }} role="img" aria-label="Grabber" />
-}
-
-// Live console clock in the toolbar — starts empty so SSR and the first
-// client render match (no hydration mismatch).
-const CLOCK_DAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
-const CLOCK_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
-function ToolbarClock() {
-  const [now, setNow] = useState('')
-  useEffect(() => {
-    const tick = () => {
-      const d = new Date()
-      const p = (n: number) => String(n).padStart(2, '0')
-      setNow(`${CLOCK_DAYS[d.getDay()]} ${p(d.getDate())} ${CLOCK_MONTHS[d.getMonth()]} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`)
-    }
-    tick()
-    const t = setInterval(tick, 1000)
-    return () => clearInterval(t)
-  }, [])
-  return <span className="tabular-nums">{now}</span>
 }
 
 export default function GrabberApp() {
@@ -1231,23 +1150,27 @@ export default function GrabberApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Toolbar — beveled console strip: tappable Build tag (debug panel),
-          live clock, raised Settings button. Build lives here because
-          iPhone's home indicator was getting in the way of tapping it. */}
-      <header className="max-w-lg mx-auto w-full px-3 pt-3">
-        <div className="toolbar flex items-center justify-between gap-2 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-primary">
-          <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="cursor-pointer hover:text-danger transition-colors py-1.5">
+      {/* Header — three-column grid so the Build tag stays dead-center even
+          when the title or settings icon change width. Build moved up here
+          from the footer because iPhone's home indicator was getting in the
+          way of tapping it for the debug panel. */}
+      <header className="grid grid-cols-3 items-center px-4 py-3 border-b border-subtle">
+        <div className="flex items-center gap-2">
+          <Download size={20} className="text-accent" />
+          <h1 className="text-base font-semibold text-text-primary">Grabber</h1>
+        </div>
+        <div className="text-center">
+          <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="text-xs text-text-muted cursor-pointer hover:text-text-secondary transition-colors px-3 py-1">
             Build {process.env.NEXT_PUBLIC_BUILD || 'dev'}
           </span>
-          <ToolbarClock />
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="raised px-2.5 py-1 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-            title="Settings"
-          >
-            <span className="inline-flex items-center gap-1.5"><Settings size={12} /> Settings</span>
-          </button>
         </div>
+        <button
+          onClick={() => setShowSettings(!showSettings)}
+          className="h-10 w-10 grid place-items-center rounded-md text-text-secondary hover:text-text-primary hover:bg-surface-2 transition-colors justify-self-end focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+          title="Settings"
+        >
+          <Settings size={18} />
+        </button>
       </header>
 
       {/* Settings — bottom sheet: slides up over the page like a native app
@@ -1260,13 +1183,13 @@ export default function GrabberApp() {
             onClick={() => setShowSettings(false)}
           />
           <div
-            className="absolute bottom-0 inset-x-0 mx-auto w-full max-w-lg sheet-panel max-h-[85vh] overflow-y-auto overscroll-contain px-4 pt-2 space-y-4 animate-sheet-up"
+            className="absolute bottom-0 inset-x-0 mx-auto w-full max-w-lg bg-surface border-t border-subtle rounded-t-lg max-h-[85vh] overflow-y-auto overscroll-contain px-4 pt-2 space-y-4 animate-sheet-up"
             style={{ paddingBottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
           >
           {/* Grab handle — signals "this is a sheet" */}
-          <div className="mx-auto h-1.5 w-10 bg-surface-2 border border-subtle" />
+          <div className="mx-auto h-1 w-9 rounded-full bg-surface-2" />
           <div className="flex items-center justify-between">
-            <p className="pixel-head text-xs font-bold uppercase tracking-[0.24em]">Settings</p>
+            <p className="text-xs uppercase tracking-wider text-text-muted">Settings</p>
             <button
               onClick={() => setSettings(s => ({ ...defaultSettings, desktopKey: s.desktopKey }))}
               className="text-xs uppercase tracking-wider text-text-muted hover:text-accent transition-colors"
@@ -1282,7 +1205,7 @@ export default function GrabberApp() {
             </div>
             <label className="relative inline-flex cursor-pointer">
               <input type="checkbox" checked={settings.autoDetect} onChange={(e) => setSettings(s => ({ ...s, autoDetect: e.target.checked }))} className="sr-only peer" />
-              <div className="cb-box" />
+              <div className="w-9 h-5 bg-surface-2 rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
@@ -1296,7 +1219,7 @@ export default function GrabberApp() {
             </div>
             <label className="relative inline-flex cursor-pointer">
               <input type="checkbox" checked={settings.autoBest} onChange={(e) => setSettings(s => ({ ...s, autoBest: e.target.checked }))} className="sr-only peer" />
-              <div className="cb-box" />
+              <div className="w-9 h-5 bg-surface-2 rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
@@ -1307,7 +1230,7 @@ export default function GrabberApp() {
             </div>
             <label className="relative inline-flex cursor-pointer">
               <input type="checkbox" checked={settings.verticalPad} onChange={(e) => setSettings(s => ({ ...s, verticalPad: e.target.checked }))} className="sr-only peer" />
-              <div className="cb-box" />
+              <div className="w-9 h-5 bg-surface-2 rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
@@ -1318,7 +1241,7 @@ export default function GrabberApp() {
             </div>
             <label className="relative inline-flex cursor-pointer">
               <input type="checkbox" checked={settings.burnSubtitles} onChange={(e) => setSettings(s => ({ ...s, burnSubtitles: e.target.checked }))} className="sr-only peer" />
-              <div className="cb-box" />
+              <div className="w-9 h-5 bg-surface-2 rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
@@ -1331,7 +1254,7 @@ export default function GrabberApp() {
             </div>
             <label className="relative inline-flex cursor-pointer">
               <input type="checkbox" checked={settings.photoMode} onChange={(e) => setSettings(s => ({ ...s, photoMode: e.target.checked }))} className="sr-only peer" />
-              <div className="cb-box" />
+              <div className="w-9 h-5 bg-surface-2 rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
@@ -1350,7 +1273,7 @@ export default function GrabberApp() {
                 onChange={(e) => setSettings(s => ({ ...s, skipDesktop: e.target.checked }))}
                 className="sr-only peer"
               />
-              <div className="cb-box" />
+              <div className="w-9 h-5 bg-surface-2 rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
             </label>
           </div>
 
@@ -1380,9 +1303,9 @@ export default function GrabberApp() {
                   <p className="text-xs text-text-secondary">Server disk</p>
                   <p className="text-xs text-text-muted font-mono">{fmt(freeBytes)} free of {fmt(totalBytes)}</p>
                 </div>
-                <div className="tbar-track flex h-3 w-full overflow-hidden">
-                  <div className="bg-[#5a6273] transition-all duration-300" style={{ width: `${pct(osBytes)}%` }} title="System (not clearable)" />
-                  <div className="tbar-fill text-[#4fc455] transition-all duration-300" style={{ width: `${pct(grabberBytes)}%` }} title="Grabber downloads (clearable)" />
+                <div className="flex h-1.5 w-full rounded-md overflow-hidden bg-surface-2">
+                  <div className="bg-text-muted/50 transition-all duration-300" style={{ width: `${pct(osBytes)}%` }} title="System (not clearable)" />
+                  <div className="bg-accent transition-all duration-300" style={{ width: `${pct(grabberBytes)}%` }} title="Grabber downloads (clearable)" />
                 </div>
                 <button
                   onClick={clearDisk}
@@ -1418,7 +1341,7 @@ export default function GrabberApp() {
                 </div>
                 <label className="relative inline-flex cursor-pointer">
                   <input type="checkbox" checked={settings.directDownload} onChange={(e) => setSettings(s => ({ ...s, directDownload: e.target.checked }))} className="sr-only peer" />
-                  <div className="cb-box" />
+                  <div className="w-9 h-5 bg-surface-2 rounded-full peer peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
                 </label>
               </div>
 
@@ -1433,7 +1356,7 @@ export default function GrabberApp() {
                   value={settings.desktopKey}
                   onChange={(e) => setSettings(s => ({ ...s, desktopKey: e.target.value }))}
                   style={{ WebkitTextSecurity: 'disc' } as any}
-                  className="w-full h-10 px-3 text-xs inset-field focus:outline-none font-mono"
+                  className="w-full h-10 px-3 text-xs bg-base border border-subtle rounded-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-accent font-mono"
                 />
               </div>
 
@@ -1449,7 +1372,7 @@ export default function GrabberApp() {
       {/* Modal: desktop key set but tunnel offline */}
       {fallbackModal && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="panel p-5 max-w-sm w-full space-y-3">
+          <div className="bg-surface rounded-lg p-5 max-w-sm w-full space-y-3 border border-subtle">
             <h3 className="text-base text-text-primary font-semibold">Desktop not online</h3>
             <p className="text-sm text-text-secondary">
               Your PC's Grabber app isn't reachable. Continue and process on this device instead?
@@ -1457,13 +1380,13 @@ export default function GrabberApp() {
             <div className="flex gap-2 justify-end pt-2">
               <button
                 onClick={() => { fallbackModal.resolve(false); setFallbackModal(null) }}
-                className="h-10 px-4 text-sm raised transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                className="h-10 px-4 text-sm font-medium rounded-md bg-surface-2 border border-subtle text-text-secondary hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 Cancel
               </button>
               <button
                 onClick={() => { setAcceptedFallback(true); fallbackModal.resolve(true); setFallbackModal(null) }}
-                className="h-10 px-4 text-sm raised transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                className="h-10 px-4 text-sm font-semibold rounded-md bg-accent hover:bg-accent-hover text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 Continue
               </button>
@@ -1473,13 +1396,7 @@ export default function GrabberApp() {
       )}
 
       {/* Main content */}
-      <main className="flex-1 px-4 py-5 max-w-lg mx-auto w-full space-y-4">
-        {/* Hero — pixel wordmark + tagline */}
-        <div className="text-center pb-1">
-          <PixelWordmark />
-          <p className="pixel-head text-[11px] font-bold uppercase tracking-[0.22em] mt-2">Paste a link to begin.</p>
-        </div>
-
+      <main className="flex-1 px-4 py-6 max-w-lg mx-auto w-full space-y-4">
         {/* URL Input */}
         <div className="space-y-3">
           <div className="flex gap-2">
@@ -1490,12 +1407,12 @@ export default function GrabberApp() {
               onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && fetchInfo(url)}
               placeholder={settings.photoMode ? 'Paste photo or post URL...' : 'Paste video URL...'}
-              className="flex-1 h-10 inset-field px-4 text-sm outline-none transition-colors"
+              className="flex-1 h-10 bg-surface border border-subtle rounded-sm px-4 text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent transition-colors"
             />
             {/* Paste — ghost icon button */}
             <button
               onClick={handlePaste}
-              className="h-10 w-10 grid place-items-center raised transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              className="h-10 w-10 grid place-items-center bg-surface-2 border border-subtle rounded-md text-text-secondary hover:text-text-primary active:bg-surface transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               title="Paste link"
               aria-label="Paste link"
             >
@@ -1508,7 +1425,7 @@ export default function GrabberApp() {
             <button
               onClick={() => fetchInfo(url)}
               disabled={!url.trim() || loading}
-              className="flex-1 h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              className="flex-1 h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white disabled:bg-surface-2 disabled:text-text-muted transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
               {loading ? <Loader size={16} className="animate-spin" /> : <Download size={16} />}
               {loading ? 'Fetching…' : settings.photoMode ? 'Fetch Photos' : 'Fetch Video'}
@@ -1517,7 +1434,7 @@ export default function GrabberApp() {
             <button
               onClick={handleReload}
               disabled={loading}
-              className="h-10 w-10 grid place-items-center raised disabled:opacity-40 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              className="h-10 w-10 grid place-items-center bg-surface-2 border border-subtle rounded-md text-text-secondary hover:text-text-primary active:bg-surface disabled:opacity-40 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               title="Start over — clear & paste new link"
               aria-label="Start over — clear and paste new link"
             >
@@ -1528,7 +1445,7 @@ export default function GrabberApp() {
 
         {/* Error */}
         {error && (
-          <div className="panel flex items-center gap-2 px-4 py-3 text-sm font-semibold text-danger animate-fade-in">
+          <div className="flex items-center gap-2 bg-danger/10 border border-danger/20 rounded-lg px-4 py-3 text-sm text-danger animate-fade-in">
             <AlertCircle size={16} className="flex-shrink-0" />
             <span className="flex-1">{error}</span>
             <button onClick={() => setError('')} className="h-8 w-8 grid place-items-center rounded-md text-danger/60 hover:text-danger hover:bg-danger/10 transition-colors" title="Dismiss">
@@ -1540,7 +1457,7 @@ export default function GrabberApp() {
         {/* Skeleton while fetching — a ghost of the result card so the wait
             reads as progress instead of a frozen page. */}
         {loading && videos.length === 0 && (
-          <div className="panel overflow-hidden animate-fade-in" aria-hidden>
+          <div className="bg-surface border border-subtle rounded-lg overflow-hidden animate-fade-in" aria-hidden>
             <div className="w-full h-44 bg-surface-2 animate-pulse" />
             <div className="p-4 space-y-3">
               <div className="h-3.5 w-2/5 bg-surface-2 rounded animate-pulse" />
@@ -1559,10 +1476,10 @@ export default function GrabberApp() {
         {videos.length > 0 && (
           <div className="space-y-3">
             {videos.length > 1 && (
-              <p className="pixel-head text-xs font-bold uppercase tracking-[0.18em]">{videos.length} videos found</p>
+              <p className="text-xs text-text-secondary">{videos.length} videos found</p>
             )}
             {videos.map((video, idx) => (
-              <div key={video.id} className="panel overflow-hidden animate-fade-in">
+              <div key={video.id} className="bg-surface border border-subtle rounded-lg overflow-hidden animate-fade-in">
                 {video.thumbnail && (
                   <div className="relative">
                     <img
@@ -1612,16 +1529,16 @@ export default function GrabberApp() {
                               onClick={() => setSelectedFormats(prev => ({ ...prev, [video.id]: f.formatId }))}
                               className={`px-3 h-8 rounded-md text-xs border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
                                 selected
-                                  ? 'raised-sel font-semibold'
-                                  : 'raised font-medium'
+                                  ? 'bg-accent border-accent text-black/90 font-semibold'
+                                  : 'bg-surface-2 text-text-secondary border-subtle font-medium hover:text-text-primary'
                               }`}
                             >
                               {f.label}
                               {/* Two-tone hierarchy in both states: bright resolution,
                                   muted size — on the filled pill that's black at ~70%. */}
-                              {f.filesize ? <span className={`ml-1 font-normal ${selected ? 'text-white/80' : 'opacity-60'}`}>· {formatSize(f.filesize)}</span> : null}
+                              {f.filesize ? <span className={`ml-1 font-normal ${selected ? 'text-black/70' : 'opacity-60'}`}>· {formatSize(f.filesize)}</span> : null}
                               {f.best && f.label !== 'Best Quality' ? (
-                                <span className={`ml-1.5 text-[10px] font-semibold uppercase tracking-wide ${selected ? 'text-white/70' : 'text-danger'}`}>Best</span>
+                                <span className={`ml-1.5 text-[10px] font-semibold uppercase tracking-wide ${selected ? 'text-black/60' : 'text-text-muted'}`}>Best</span>
                               ) : null}
                             </button>
                           )
@@ -1633,7 +1550,7 @@ export default function GrabberApp() {
                           const fmt = video.formats.find(f => f.formatId === fmtId)
                           handleDownload(video, fmtId, fmt?.label || 'Best Quality')
                         }}
-                        className="w-full h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                        className="w-full h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                       >
                         <Download size={16} />
                         Download{videos.length > 1 ? ` #${idx + 1}` : ''}
@@ -1654,7 +1571,7 @@ export default function GrabberApp() {
                     handleDownload(v, fmtId, fmt?.label || 'Best Quality')
                   }
                 }}
-                className="w-full h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                className="w-full h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 <Download size={16} />
                 Download All ({videos.length} videos)
@@ -1666,9 +1583,9 @@ export default function GrabberApp() {
         {/* Photo jobs (gallery-dl) — separate section with grid layout. */}
         {photoJobs.length > 0 && (
           <div className="space-y-3">
-            <h3 className="pixel-head text-xs font-bold uppercase tracking-[0.24em]">Photos</h3>
+            <h3 className="text-xs font-medium text-text-secondary uppercase tracking-wider">Photos</h3>
             {photoJobs.map((job) => (
-              <div key={job.id} className="panel p-3 animate-fade-in space-y-3">
+              <div key={job.id} className="bg-surface border border-subtle rounded-lg p-3 animate-fade-in space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-text-primary truncate">{job.url}</p>
@@ -1710,27 +1627,27 @@ export default function GrabberApp() {
                        (no tap possible — share would fail iOS gesture check)
                     3. Ready → tap-to-save (success) */}
                 {job.status === 'downloading' && (
-                  <button disabled className="w-full h-10 px-4 raised text-sm font-medium">
+                  <button disabled className="w-full h-10 px-4 bg-surface-2 rounded-md text-sm font-medium text-text-muted">
                     Wait — still fetching…
                   </button>
                 )}
                 {job.status === 'done' && !job.ready && (
-                  <div className="relative w-full h-10 tbar-track overflow-hidden">
+                  <div className="relative w-full h-10 bg-surface-2 rounded-md overflow-hidden">
                     {(job.prefetchPct || 0) > 0 ? (
-                      <div className="absolute inset-y-0 left-0 tbar-fill text-[#5a9ee8] transition-all duration-200" style={{ width: `${job.prefetchPct}%` }} />
+                      <div className="absolute inset-y-0 left-0 bg-accent transition-all duration-200 rounded-md" style={{ width: `${job.prefetchPct}%` }} />
                     ) : (
-                      <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
+                      <div className="animate-indeterminate bg-accent rounded-md" />
                     )}
                     <div className="relative flex items-center justify-center h-full gap-1.5">
-                      <Loader size={14} className="animate-spin text-white" />
-                      <span className="text-xs font-medium text-white">Preparing…{(job.prefetchPct || 0) > 0 ? ` ${job.prefetchPct}%` : ''}</span>
+                      <Loader size={14} className="animate-spin text-text-primary" />
+                      <span className="text-xs font-medium text-text-primary">Preparing…{(job.prefetchPct || 0) > 0 ? ` ${job.prefetchPct}%` : ''}</span>
                     </div>
                   </div>
                 )}
                 {job.status === 'done' && job.ready && (
                   <button
                     onClick={() => handlePhotoSaveAll(job)}
-                    className="w-full h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                    className="w-full h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                   >
                     <Download size={16} />
                     {isIOS() ? `Save all ${job.files.length} to Photos` : `Share all ${job.files.length}`}
@@ -1745,13 +1662,13 @@ export default function GrabberApp() {
         {downloads.length > 0 && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="pixel-head text-xs font-bold uppercase tracking-[0.24em]">Downloads</h3>
+              <h3 className="text-xs font-medium text-text-secondary uppercase tracking-wider">Downloads</h3>
               {/* Only terminal jobs are clearable — converting/subtitling are
                   still active work, not "completed". */}
               {downloads.some(d => d.status === 'done' || d.status === 'error') && (
                 <button
                   onClick={() => setDownloads(prev => prev.filter(d => d.status !== 'done' && d.status !== 'error'))}
-                  className="pixel-head text-[10px] font-bold uppercase tracking-[0.14em] hover:text-[#ffd54a] hover:underline transition-colors"
+                  className="text-xs text-text-secondary hover:text-text-primary hover:underline transition-colors"
                 >
                   Clear completed
                 </button>
@@ -1763,7 +1680,7 @@ export default function GrabberApp() {
               return (
               <div
                 key={dl.id}
-                className="panel p-3 animate-fade-in"
+                className="bg-surface border border-subtle rounded-lg p-3 animate-fade-in"
               >
                 <div className="flex gap-3 items-start">
                   {dl.thumbnail && (
@@ -1839,11 +1756,11 @@ export default function GrabberApp() {
                       const determinate = dl.percent > 0
                       return (
                         <>
-                          <div className="mt-2 relative w-full h-1.5 tbar-track overflow-hidden">
+                          <div className="mt-2 relative w-full h-1.5 bg-surface-2 rounded-md overflow-hidden">
                             {determinate ? (
-                              <div className="h-full tbar-fill text-[#5a9ee8] transition-all duration-300" style={{ width: `${dl.percent}%` }} />
+                              <div className="h-full bg-accent rounded-md transition-all duration-300" style={{ width: `${dl.percent}%` }} />
                             ) : (
-                              <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
+                              <div className="animate-indeterminate bg-accent rounded-md" />
                             )}
                           </div>
                           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
@@ -1868,30 +1785,30 @@ export default function GrabberApp() {
                   <div className="mt-3">
                         {instantProgress[dl.id] ? (
                           // On-device processing — accent determinate bar.
-                          <div className="relative w-full h-9 tbar-track overflow-hidden">
+                          <div className="relative w-full h-9 bg-surface-2 rounded-md overflow-hidden">
                             {instantProgress[dl.id].pct > 0 ? (
-                              <div className="absolute inset-y-0 left-0 tbar-fill text-[#5a9ee8] transition-all duration-200" style={{ width: `${instantProgress[dl.id].pct}%` }} />
+                              <div className="absolute inset-y-0 left-0 bg-accent transition-all duration-200 rounded-md" style={{ width: `${instantProgress[dl.id].pct}%` }} />
                             ) : (
-                              <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
+                              <div className="animate-indeterminate bg-accent rounded-md" />
                             )}
                             <div className="relative flex items-center justify-center h-full gap-1.5">
-                              <Loader size={14} className="animate-spin text-white" />
-                              <span className="text-xs font-medium text-white">
+                              <Loader size={14} className="animate-spin text-text-primary" />
+                              <span className="text-xs font-medium text-text-primary">
                                 {instantProgress[dl.id].stage}{instantProgress[dl.id].pct > 0 ? ` ${instantProgress[dl.id].pct}%` : ''}
                               </span>
                             </div>
                           </div>
                         ) : saveProgress[dl.id] !== undefined ? (
                           // Preparing the file for share — accent; indeterminate when -1.
-                          <div className="relative w-full h-9 tbar-track overflow-hidden">
+                          <div className="relative w-full h-9 bg-surface-2 rounded-md overflow-hidden">
                             {saveProgress[dl.id] >= 0 ? (
-                              <div className="absolute inset-y-0 left-0 tbar-fill text-[#5a9ee8] transition-all duration-200" style={{ width: `${saveProgress[dl.id]}%` }} />
+                              <div className="absolute inset-y-0 left-0 bg-accent transition-all duration-200 rounded-md" style={{ width: `${saveProgress[dl.id]}%` }} />
                             ) : (
-                              <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
+                              <div className="animate-indeterminate bg-accent rounded-md" />
                             )}
                             <div className="relative flex items-center justify-center h-full gap-1.5">
-                              <Loader size={14} className="animate-spin text-white" />
-                              <span className="text-xs font-medium text-white">
+                              <Loader size={14} className="animate-spin text-text-primary" />
+                              <span className="text-xs font-medium text-text-primary">
                                 {saveProgress[dl.id] >= 0 ? `Preparing… ${saveProgress[dl.id]}%` : 'Preparing…'}
                                 {saveSpeed[dl.id] ? ` · ${saveSpeed[dl.id]}` : ''}
                               </span>
@@ -1902,7 +1819,7 @@ export default function GrabberApp() {
                           <div className="space-y-2">
                             <button
                               onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
-                              className="w-full h-10 px-4 raised text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                              className="w-full h-10 px-4 bg-accent hover:bg-accent-hover rounded-md text-sm font-semibold text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                             >
                               Save file
                             </button>
@@ -1917,13 +1834,13 @@ export default function GrabberApp() {
                           <div className="flex gap-2">
                             <button
                               onClick={() => handleSaveToPhotos(dl.id, dl.fileName || 'download')}
-                              className="flex-1 h-10 px-4 raised text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                              className="flex-1 h-10 px-4 bg-transparent border border-accent text-accent hover:bg-accent-muted rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                             >
                               {isIOS() ? 'Save to Photos' : 'Share'}
                             </button>
                             <button
                               onClick={() => handleDirectDownload(dl.id, dl.fileName || 'download')}
-                              className="h-10 w-10 grid place-items-center raised transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                              className="h-10 w-10 grid place-items-center bg-surface-2 border border-subtle rounded-md text-text-secondary hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                               title="Save file"
                               aria-label="Save file"
                             >
@@ -1933,14 +1850,14 @@ export default function GrabberApp() {
                         ) : canShare && !fileReady[dl.id] ? (
                           <button
                             onClick={() => prefetchFile(dl.id, dl.fileName || 'download')}
-                            className="w-full h-10 px-4 raised text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                            className="w-full h-10 px-4 bg-surface-2 border border-subtle hover:text-text-primary text-text-secondary rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                           >
                             Retry Prepare
                           </button>
                         ) : (
                           <button
                             onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
-                            className="w-full h-10 px-4 raised text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                            className="w-full h-10 px-4 bg-transparent border border-accent text-accent hover:bg-accent-muted rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                           >
                             Save file
                           </button>
@@ -1954,18 +1871,18 @@ export default function GrabberApp() {
 
         {/* Empty state */}
         {videos.length === 0 && !loading && downloads.length === 0 && (
-          <div className="text-center py-12">
-            <Download size={40} strokeWidth={1.5} className="mx-auto mb-3 text-[#f4f5f7]" style={{ filter: 'drop-shadow(1.5px 1.5px 0 #22262e)' }} />
-            <p className="pixel-head text-sm font-bold uppercase tracking-[0.14em]">
+          <div className="text-center py-12 text-text-muted">
+            <Download size={40} strokeWidth={1} className="mx-auto mb-3" />
+            <p className="text-sm text-text-secondary">
               {settings.photoMode ? 'Paste a photo or post URL to get started' : 'Paste a video URL to get started'}
             </p>
-            <p className="text-xs mt-2 text-[#d3d7de]">
+            <p className="text-xs mt-1">
               {settings.photoMode
                 ? 'Photos mode is on — grabs images & carousels'
                 : 'Works with YouTube, TikTok, Instagram, and 1800+ sites'}
             </p>
             {settings.autoDetect && (
-              <p className="text-xs mt-3 text-[#aebfd8]">
+              <p className="text-xs mt-3 text-accent/70">
                 Clipboard auto-detection is on
               </p>
             )}
@@ -1975,12 +1892,12 @@ export default function GrabberApp() {
 
       {/* Debug panel */}
       {showDebug && (
-        <div className="border-t-2 border-subtle bg-[#1a1d24] px-4 py-2 max-h-48 overflow-y-auto">
+        <div className="border-t border-subtle bg-base px-4 py-2 max-h-48 overflow-y-auto">
           <div className="flex items-center justify-between mb-1">
-            <span className="text-[10px] text-[#e0bd4a] uppercase tracking-[0.2em] font-mono">Debug Log</span>
-            <button onClick={() => setDebugLogs([])} className="text-xs text-[#8b93a5] hover:text-white">Clear</button>
+            <span className="text-xs text-text-muted uppercase font-mono">Debug Log</span>
+            <button onClick={() => setDebugLogs([])} className="text-xs text-text-muted hover:text-text-secondary">Clear</button>
           </div>
-          <pre className="text-xs text-[#4fc455] font-mono whitespace-pre-wrap break-all">
+          <pre className="text-xs text-success font-mono whitespace-pre-wrap break-all">
             {debugLogs.length === 0 ? 'No logs yet — start a download to see polling + worker output.' : ''}
             {debugLogs.join('\n')}
           </pre>

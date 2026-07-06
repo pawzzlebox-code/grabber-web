@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ----------------------------------------------------------------------------
+   Design tokens — single source of truth. Components reference these via the
+   Tailwind theme (bg-surface, text-primary, accent, etc.), never hardcoded hex.
+   ------------------------------------------------------------------------- */
+:root {
+  /* Color */
+  --bg-base: #0a0a0a;        /* page background */
+  --bg-surface: #161616;     /* cards */
+  --bg-surface-2: #232323;   /* nested surfaces: pills, progress track */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+
+  --text-primary: #f5f5f5;
+  --text-secondary: #a3a3a3;
+  --text-muted: #6b6b6b;
+
+  --accent: #0ea5e9;         /* primary cyan-blue (sky-500) */
+  --accent-hover: #0284c7;   /* sky-600 */
+  --accent-muted: rgba(14, 165, 233, 0.15); /* selected-state fill */
+
+  --success: #22c55e;        /* completed states ONLY */
+  --danger: #ef4444;         /* destructive / cancel */
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Fixed-width digits app-wide so live numbers (percent, speed, ETA)
+     don't make text wiggle as they update. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Press feedback — every enabled button dips slightly while held, so taps
+   feel acknowledged on touch screens where hover doesn't exist. */
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Respect the user's motion preference: collapse all animations and
+   transitions to effectively instant. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-surface-2); border-radius: 3px; }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+@keyframes pulse-bar {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.animate-pulse-bar {
+  animation: pulse-bar 1.5s ease-in-out infinite;
+}
+
+/* Indeterminate progress — a segment that sweeps across the track. Used while
+   a job is preparing/indeterminate (no real percentage yet). */
+@keyframes indeterminate {
+  0%   { left: -40%; width: 40%; }
+  50%  { left: 30%;  width: 50%; }
+  100% { left: 100%; width: 40%; }
+}
+
+.animate-indeterminate {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  animation: indeterminate 1.4s ease-in-out infinite;
+}
+
+/* Settings bottom sheet — slides up from the bottom edge; backdrop fades in. */
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.animate-sheet-up {
+  animation: sheet-up 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-backdrop-in {
+  animation: backdrop-in 0.2s ease-out;
+}

@@ -23,11 +23,10 @@ module.exports = {
         subtle: 'var(--border-subtle)',
       },
       borderRadius: {
-        // Pixel-console scale: controls are square; only panels keep a hint
-        // of molded-plastic rounding (matches .panel in globals.css).
-        sm: '0px',  // inputs, text fields
-        md: '0px',  // pills, buttons
-        lg: '6px',  // cards, containers
+        // Commit to this radius scale — no other values in the UI.
+        sm: '4px',  // inputs, text fields
+        md: '6px',  // pills, buttons
+        lg: '8px',  // cards, containers
       },
     },
   },

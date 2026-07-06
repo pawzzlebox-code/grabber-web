@@ -5,39 +5,167 @@
 /* ----------------------------------------------------------------------------
    Design tokens — single source of truth. Components reference these via the
    Tailwind theme (bg-surface, text-primary, accent, etc.), never hardcoded hex.
+
+   PIXEL CONSOLE THEME — fantasy-console dev-tool look: slate blue-grey ground,
+   grey molded panels, raised beveled buttons (light edge top-left, dark edge
+   bottom-right; pressed = bevel flips), inset dark wells for inputs/progress,
+   chunky uppercase type with hard drop shadows on headings.
+   Original dark theme preserved in web/ui-backup-original/.
    ------------------------------------------------------------------------- */
 :root {
   /* Color */
-  --bg-base: #0a0a0a;        /* page background */
-  --bg-surface: #161616;     /* cards */
-  --bg-surface-2: #232323;   /* nested surfaces: pills, progress track */
-  --border-subtle: rgba(255, 255, 255, 0.08);
+  --bg-base: #5d6880;        /* slate ground */
+  --bg-surface: #939baa;     /* grey panels / cards */
+  --bg-surface-2: #b9bdc6;   /* raised controls, nested surfaces */
+  --border-subtle: #363b46;  /* dark outline — structure comes from bevels */
 
-  --text-primary: #f5f5f5;
-  --text-secondary: #a3a3a3;
-  --text-muted: #6b6b6b;
+  --text-primary: #22262e;   /* ink on grey */
+  --text-secondary: #3d4452;
+  --text-muted: #4d5464;
 
-  --accent: #0ea5e9;         /* primary cyan-blue (sky-500) */
-  --accent-hover: #0284c7;   /* sky-600 */
-  --accent-muted: rgba(14, 165, 233, 0.15); /* selected-state fill */
+  --accent: #2f6cb8;         /* console blue — dark enough for text on grey */
+  --accent-hover: #275c9e;
+  --accent-muted: rgba(47, 108, 184, 0.22); /* selected-state fill */
 
-  --success: #22c55e;        /* completed states ONLY */
-  --danger: #ef4444;         /* destructive / cancel */
+  --success: #1e7c2c;        /* completed states ONLY (dark for contrast) */
+  --danger: #ab2f3b;         /* destructive / cancel */
+
+  /* Bevel machinery */
+  --hi: #eaecf0;             /* bevel light edge */
+  --lo: #363b46;             /* bevel dark edge */
+  --ink: #22262e;
+  --track: #333947;          /* inset wells: inputs, progress tracks */
+  --head-white: #f4f5f7;     /* headings + text over dark wells */
 }
 
 body {
   background: var(--bg-base);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: Consolas, 'Courier New', 'Lucida Console', monospace;
   /* Fixed-width digits app-wide so live numbers (percent, speed, ETA)
      don't make text wiggle as they update. */
   font-variant-numeric: tabular-nums;
+}
+
+/* Pixel-console vocabulary: every control label reads as a chunky cap. */
+button {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 /* Press feedback — every enabled button dips slightly while held, so taps
    feel acknowledged on touch screens where hover doesn't exist. */
 button:active:not(:disabled) {
   transform: scale(0.97);
+}
+
+/* ── Component classes ────────────────────────────────────────────────── */
+
+/* Molded grey panel — cards, sheets, modals. */
+.panel {
+  background: var(--bg-surface);
+  border: 2px solid var(--lo);
+  border-radius: 6px;
+  box-shadow:
+    inset 2px 2px 0 rgba(255, 255, 255, 0.35),
+    inset -2px -2px 0 rgba(0, 0, 0, 0.18);
+}
+
+/* Raised beveled control — the star of the theme. !important so it wins
+   over leftover Tailwind color utilities on the same element. */
+.raised {
+  background: var(--bg-surface-2) !important;
+  border: 3px solid !important;
+  border-color: var(--hi) var(--lo) var(--lo) var(--hi) !important;
+  border-radius: 0 !important;
+  color: var(--ink) !important;
+  text-shadow: 1px 1px 0 rgba(255, 255, 255, 0.4);
+}
+.raised:hover:not(:disabled) { background: #c6cad2 !important; }
+.raised:active:not(:disabled) {
+  border-color: var(--lo) var(--hi) var(--hi) var(--lo) !important;
+}
+.raised:disabled {
+  opacity: 0.55;
+  text-shadow: none;
+}
+
+/* Selected/pressed-in variant (accent fill) — e.g. the chosen format pill. */
+.raised-sel {
+  background: var(--accent) !important;
+  border: 3px solid !important;
+  border-color: var(--lo) var(--hi) var(--hi) var(--lo) !important;
+  border-radius: 0 !important;
+  color: #ffffff !important;
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.4);
+}
+
+/* Toolbar strip (header) — raised bar, not a button. */
+.toolbar {
+  background: var(--bg-surface-2);
+  border: 2px solid;
+  border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+}
+
+/* Inset dark well — text inputs. */
+.inset-field {
+  background: var(--track) !important;
+  border: 2px solid !important;
+  border-color: var(--lo) var(--hi) var(--hi) var(--lo) !important;
+  border-radius: 0 !important;
+  color: var(--head-white) !important;
+  caret-color: var(--head-white);
+}
+.inset-field::placeholder { color: #8b93a5 !important; }
+
+/* Inset dark track for progress bars; pair with .tbar-fill segments. */
+.tbar-track {
+  background: var(--track);
+  border: 2px solid;
+  border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+  border-radius: 0 !important;
+}
+/* Blocky segmented fill — color comes from a text-* class (currentColor). */
+.tbar-fill {
+  background-image: repeating-linear-gradient(90deg, currentColor 0 6px, transparent 6px 8px);
+}
+
+/* Beveled pixel checkbox — pair with a `sr-only peer` input sibling. */
+.cb-box {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg-surface-2);
+  border: 3px solid;
+  border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+  color: var(--ink);
+}
+.cb-box::after {
+  content: '';
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+input:checked + .cb-box::after { content: '✓'; }
+input:focus-visible + .cb-box {
+  outline: 2px dashed var(--ink);
+  outline-offset: 2px;
+}
+input:disabled + .cb-box { opacity: 0.6; }
+
+/* Heading treatment — white pixel caps with a hard dark shadow. */
+.pixel-head {
+  color: var(--head-white);
+  text-shadow: 1.5px 1.5px 0 var(--ink);
+}
+
+/* Settings sheet chrome. */
+.sheet-panel {
+  background: var(--bg-surface);
+  border-top: 3px solid var(--lo);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.35);
 }
 
 /* Respect the user's motion preference: collapse all animations and
@@ -50,10 +178,13 @@ button:active:not(:disabled) {
   }
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--bg-surface-2); border-radius: 3px; }
+/* Custom scrollbar — chunky beveled thumb. */
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: #4c5670; }
+::-webkit-scrollbar-thumb {
+  background: var(--bg-surface-2);
+  border: 2px solid var(--lo);
+}
 
 @keyframes fade-in {
   from { opacity: 0; transform: translateY(8px); }
