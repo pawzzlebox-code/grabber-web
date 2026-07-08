@@ -178,6 +178,25 @@ function cookieArgs(): string[] {
   return ['--cookies', COOKIE_FILE]
 }
 
+// Instagram rejects requests carrying a session cookie with HTTP 400 /
+// "empty media response" when they come from a datacenter IP — the
+// logged-in API path gets flagged while the anonymous one sails through
+// (verified: same reel 400s with cookies, extracts fine without, across
+// UA and proxy variations). Public posts/reels therefore go WITHOUT
+// cookies; only stories/highlights genuinely require the login.
+function cookieFileFor(url: string): string | undefined {
+  if (cookieArgs().length === 0) return undefined
+  try {
+    const u = new URL(url)
+    const host = u.hostname.replace(/^www\./, '')
+    if (host === 'instagram.com' || host.endsWith('.instagram.com')) {
+      const needsLogin = /\/(stories|highlights|direct)\//i.test(u.pathname)
+      return needsLogin ? COOKIE_FILE : undefined
+    }
+  } catch {}
+  return COOKIE_FILE
+}
+
 function proxyArgs(url?: string): string[] {
   const proxy = process.env.PROXY_URL
   if (!proxy) return []
@@ -489,8 +508,7 @@ export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInf
   // helpers into the raw values the worker command expects.
   const proxyA = proxyArgs(url)
   const proxy = proxyA.length ? proxyA[1] : undefined
-  const cookieA = cookieArgs()
-  const cookies = cookieA.length ? cookieA[1] : undefined
+  const cookies = cookieFileFor(url)
 
   return new Promise((resolve, reject) => {
     const jobId = `info-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
@@ -1206,7 +1224,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   ]
   const proxyBypassed = !!hostname && bypassHosts.some(h => hostname === h || hostname.endsWith('.' + h))
   const proxy = process.env.PROXY_URL && !proxyBypassed ? process.env.PROXY_URL : undefined
-  const cookies = fs.existsSync(COOKIE_FILE) ? COOKIE_FILE : undefined
+  const cookies = cookieFileFor(url)
 
   function attemptDownload(attempt: number, useFallbackFormat: boolean = false) {
     job.percent = 0
