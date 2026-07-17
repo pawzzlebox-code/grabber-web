@@ -501,16 +501,30 @@ export default function GrabberApp() {
         setError(`Save failed: ${err?.message || err}`)
       })
     } else {
-      // Non-share browsers (desktop): download each as a blob URL.
-      for (const f of cached) {
+      handlePhotoDownloadAll(job)
+    }
+  }
+
+  // Plain browser downloads for every file in the job — the reliable path on
+  // desktop, where the share sheet either doesn't exist or opens a useless
+  // OS flyout. Staggered clicks so Chrome's multi-download throttle shows
+  // its "allow multiple downloads" prompt instead of silently dropping files.
+  const handlePhotoDownloadAll = (job: PhotoJob) => {
+    const cached = photoCache.current[job.id]
+    if (!cached || !job.ready) {
+      setError('Files still preparing — wait for the green button.')
+      return
+    }
+    cached.forEach((f, i) => {
+      setTimeout(() => {
         const url = URL.createObjectURL(f)
         const a = document.createElement('a')
         a.href = url
         a.download = f.name
         document.body.appendChild(a); a.click(); document.body.removeChild(a)
-        setTimeout(() => URL.revokeObjectURL(url), 1000)
-      }
-    }
+        setTimeout(() => URL.revokeObjectURL(url), 2000)
+      }, i * 250)
+    })
   }
 
   // Background prefetch — fires whenever a photo job flips to `done`. Loads
@@ -1728,13 +1742,39 @@ export default function GrabberApp() {
                   </div>
                 )}
                 {job.status === 'done' && job.ready && (
-                  <button
-                    onClick={() => handlePhotoSaveAll(job)}
-                    className="w-full h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-                  >
-                    <Download size={16} />
-                    {isIOS() ? `Save all ${job.files.length} to Photos` : `Share all ${job.files.length}`}
-                  </button>
+                  // iOS: share sheet is the way into the Photos app, so it
+                  // stays primary with a download icon beside it. Everywhere
+                  // else: plain downloads are primary (desktop share flyouts
+                  // are useless), with share demoted to an icon when the
+                  // browser genuinely supports file sharing.
+                  <div className="flex gap-2">
+                    {isIOS() && canShare ? (
+                      <>
+                        <button
+                          onClick={() => handlePhotoSaveAll(job)}
+                          className="flex-1 h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                        >
+                          Save all {job.files.length} to Photos
+                        </button>
+                        <button
+                          onClick={() => handlePhotoDownloadAll(job)}
+                          className="h-10 w-10 grid place-items-center raised transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                          title="Download files"
+                          aria-label="Download files"
+                        >
+                          <Download size={16} />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => handlePhotoDownloadAll(job)}
+                        className="flex-1 h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                      >
+                        <Download size={16} />
+                        Download all {job.files.length}
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             ))}
