@@ -178,24 +178,34 @@ function cookieArgs(): string[] {
   return ['--cookies', COOKIE_FILE]
 }
 
+function isInstagramUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '')
+    return host === 'instagram.com' || host.endsWith('.instagram.com')
+  } catch { return false }
+}
+
 // Instagram rejects requests carrying a session cookie with HTTP 400 /
 // "empty media response" when they come from a datacenter IP — the
 // logged-in API path gets flagged while the anonymous one sails through
 // (verified: same reel 400s with cookies, extracts fine without, across
 // UA and proxy variations). Public posts/reels therefore go WITHOUT
-// cookies; only stories/highlights genuinely require the login.
+// cookies; only stories/highlights genuinely require the login. When an
+// anonymous attempt hits a login wall (private/limited posts), callers
+// escalate once with the cookie file — see IG_COOKIE_RESCUE users.
 function cookieFileFor(url: string): string | undefined {
   if (cookieArgs().length === 0) return undefined
-  try {
-    const u = new URL(url)
-    const host = u.hostname.replace(/^www\./, '')
-    if (host === 'instagram.com' || host.endsWith('.instagram.com')) {
-      const needsLogin = /\/(stories|highlights|direct)\//i.test(u.pathname)
-      return needsLogin ? COOKIE_FILE : undefined
-    }
-  } catch {}
+  if (isInstagramUrl(url)) {
+    const needsLogin = /\/(stories|highlights|direct)\//i.test(new URL(url).pathname)
+    return needsLogin ? COOKIE_FILE : undefined
+  }
   return COOKIE_FILE
 }
+
+// Anonymous-Instagram failures where retrying with the login is worth it:
+// login walls, "empty media response" (IG's opaque catch-all for gated
+// content), availability errors, and rate-limits.
+const IG_COOKIE_RESCUE = /empty media|log.?in|available|400|rate.?limit|checkpoint/i
 
 function proxyArgs(url?: string): string[] {
   const proxy = process.env.PROXY_URL
@@ -492,7 +502,7 @@ function buildVideoInfo(json: any, twitter: boolean, fallbackUrl: string, index?
   }
 }
 
-export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInfo[]> {
+export async function fetchVideoInfo(url: string, attempt = 0, forceCookies = false): Promise<VideoInfo[]> {
   if (isChannelOrPlaylist(url)) {
     throw new Error('Channel and playlist URLs are not supported. Please paste a link to a specific video.')
   }
@@ -508,7 +518,7 @@ export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInf
   // helpers into the raw values the worker command expects.
   const proxyA = proxyArgs(url)
   const proxy = proxyA.length ? proxyA[1] : undefined
-  const cookies = cookieFileFor(url)
+  const cookies = forceCookies && cookieArgs().length ? COOKIE_FILE : cookieFileFor(url)
 
   return new Promise((resolve, reject) => {
     const jobId = `info-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
@@ -551,10 +561,17 @@ export async function fetchVideoInfo(url: string, attempt = 0): Promise<VideoInf
           settled = true
           clearTimeout(timeout)
           console.error('[info] extract failed (attempt ' + (attempt + 1) + '):', message.slice(0, 300))
+          // Anonymous Instagram fetch hit a login wall — escalate once to
+          // the cookie file before burning normal retry slots.
+          if (!forceCookies && !cookies && isInstagramUrl(url) && cookieArgs().length > 0 && IG_COOKIE_RESCUE.test(message)) {
+            console.log('[info] Instagram anonymous fetch blocked — retrying with login cookies')
+            fetchVideoInfo(url, attempt, true).then(resolve).catch(reject)
+            return
+          }
           if (attempt < MAX_RETRIES && isRetryable(message)) {
             console.log(`[info] Retrying (${attempt + 2}/${MAX_RETRIES + 1})...`)
             setTimeout(() => {
-              fetchVideoInfo(url, attempt + 1).then(resolve).catch(reject)
+              fetchVideoInfo(url, attempt + 1, forceCookies).then(resolve).catch(reject)
             }, RETRY_DELAY_MS * (attempt + 1))
             return
           }
@@ -1224,7 +1241,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   ]
   const proxyBypassed = !!hostname && bypassHosts.some(h => hostname === h || hostname.endsWith('.' + h))
   const proxy = process.env.PROXY_URL && !proxyBypassed ? process.env.PROXY_URL : undefined
-  const cookies = cookieFileFor(url)
+  let cookies = cookieFileFor(url)
 
   function attemptDownload(attempt: number, useFallbackFormat: boolean = false) {
     job.percent = 0
@@ -1405,6 +1422,16 @@ export function startDownload(id: string, url: string, formatId?: string, title?
             (traceback ? `  traceback:\n${traceback}\n` : '') +
             `[debug] ============================================\n`,
           )
+          // Anonymous Instagram download hit a login wall — escalate once
+          // to the cookie file without spending a retry slot.
+          if (!cookies && isInstagramUrl(url) && cookieArgs().length > 0 && IG_COOKIE_RESCUE.test(message)) {
+            cookies = COOKIE_FILE
+            console.log('[ytdlp-pool] Instagram anonymous download blocked — retrying with login cookies')
+            job.speed = 'Retrying with login...'
+            notify(job, { type: 'status', message: job.speed })
+            setTimeout(() => attemptDownload(attempt, useFallbackFormat), 200)
+            return
+          }
           // Stale formatId — immediately retry with the resilient
           // H.264-preferred chain instead of using a retry slot.
           if (!useFallbackFormat && /Requested format is not available/i.test(message)) {
