@@ -304,13 +304,16 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
   })
 
   // Shared encoder config for both paths.
+  //
+  // latencyMode is deliberately left at the default ('quality'). 'realtime'
+  // lets the encoder DROP frames when it falls behind, which on a 4K source
+  // produced a fraction of the expected bitrate — a visibly blurry file.
+  // Correctness beats speed here: the default applies backpressure instead,
+  // so every decoded frame actually lands in the output.
   const encConfig = {
     codec: 'avc' as const,
     bitrate: QUALITY_HIGH,
     hardwareAcceleration: 'prefer-hardware' as const,
-    // Real-time latency mode: encoder prioritizes speed over quality, can drop
-    // frames if it gets backed up. Big speedup on iOS VideoToolbox.
-    latencyMode: 'realtime' as const,
   }
 
   // Compositing path uses a canvas; passthrough path encodes frames directly.

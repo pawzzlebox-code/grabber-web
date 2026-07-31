@@ -810,13 +810,21 @@ export default function GrabberApp() {
             // codec transcode (when source isn't iOS-Photos-compatible —
             // VP9/AV1), AND iOS-fixup for Twitter (H.264 source but with
             // non-square SAR + odd profile that iOS Photos rejects).
-            const needsCodecTranscode = !!state.sourceCodec
+            //
+            // Both compatibility re-encodes are iOS-ONLY. Desktop and Android
+            // browsers play VP9/AV1 natively, so re-encoding there is pure
+            // loss: it costs minutes and throws away quality (a 2160p AV1
+            // download came back as an 8 MB blur). Pad and subtitles are
+            // explicit user requests, so those still run everywhere.
+            const ios = isIOS()
+            const needsCodecTranscode = ios
+              && !!state.sourceCodec
               && state.sourceCodec !== 'h264'
               && state.sourceCodec !== 'hevc'
             let isTwitter = false
             try {
               const h = new URL(video.url).hostname.replace(/^www\./, '')
-              isTwitter = h === 'twitter.com' || h === 'x.com' || h === 't.co'
+              isTwitter = ios && (h === 'twitter.com' || h === 'x.com' || h === 't.co')
             } catch {}
             const needsWebCodecs = settings.burnSubtitles || settings.verticalPad || needsCodecTranscode || isTwitter
             const useInstant = !usingDesktop && webCodecsSupported && needsWebCodecs

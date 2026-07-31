@@ -206,11 +206,12 @@ export async function processVideoGpu(videoBlob: Blob, options: ProcessOptions):
 
   // Output side
   const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() })
+  // No latencyMode: 'realtime' — see the note in webcodecs-processor.ts; it
+  // drops frames under load and guts quality on high-resolution sources.
   const canvasSource = new CanvasSource(gpu.canvas, {
     codec: 'avc',
     bitrate: QUALITY_HIGH,
     hardwareAcceleration: 'prefer-hardware',
-    latencyMode: 'realtime',
   })
   output.addVideoTrack(canvasSource)
 
