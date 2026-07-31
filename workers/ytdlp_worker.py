@@ -101,7 +101,14 @@ def run_download(cmd):
         # re-encode simply never runs. This is a soft preference, not a
         # filter: sites without H.264 fall back to their best codec exactly
         # as before. Composes with the height caps in the format strings.
-        'format_sort': ['vcodec:h264', 'acodec:aac'],
+        #
+        # 'res' MUST come first. Without it these codec preferences outrank
+        # resolution, and since YouTube's itag 18 (360p progressive) is the
+        # only stream that is BOTH h264 and aac, it beat every high-res
+        # video-only format: picking "Best" on a 4K video silently returned
+        # 360p. Resolution decides first; codec only breaks ties within the
+        # same resolution.
+        'format_sort': ['res', 'vcodec:h264', 'acodec:aac'],
         'noplaylist': cmd.get('no_playlist', True),
         'check_formats': False,
         'updatetime': False,
