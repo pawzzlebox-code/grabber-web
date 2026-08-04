@@ -110,6 +110,14 @@ def run_download(cmd):
         # same resolution.
         'format_sort': ['res', 'vcodec:h264', 'acodec:aac'],
         'noplaylist': cmd.get('no_playlist', True),
+        # Keep going when an individual item in a multi-item extraction fails.
+        # Pages scraped by the generic extractor (Snapchat shares especially)
+        # expose several media URLs, some of which yt-dlp refuses on sight
+        # ("The extracted extension ('IRZXSOY') is unusual"). Without this the
+        # first junk entry aborted the whole job even though the real video
+        # sat right behind it. The existence check after the download keeps
+        # this from turning a total failure into a silent success.
+        'ignoreerrors': 'only_download',
         'check_formats': False,
         'updatetime': False,
         # Droplet now has 1GB RAM (~490MB free). Download 4 fragments in
@@ -170,7 +178,11 @@ def run_download(cmd):
                 filepath = requested[0].get('filepath') or requested[0].get('_filename')
         if not filepath and info:
             filepath = ydl.prepare_filename(info)
-        emit({'type': 'done', 'job_id': ctx.job_id, 'filepath': filepath or ''})
+        # With ignoreerrors on, yt-dlp can finish "successfully" having saved
+        # nothing at all. Only call it done if a real file landed on disk.
+        if not filepath or not os.path.exists(filepath):
+            raise Exception('yt-dlp produced no downloadable file for this URL')
+        emit({'type': 'done', 'job_id': ctx.job_id, 'filepath': filepath})
 
 
 def run_extract_info(cmd):
