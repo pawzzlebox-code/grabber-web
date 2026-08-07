@@ -32,7 +32,9 @@ async function init() {
     btn.disabled = true
     btn.innerHTML = 'Syncing...'
 
-    const domains = ['youtube.com', 'instagram.com', 'twitter.com']
+    // x.com holds X's login cookies post-rebrand; twitter.com only has guest
+    // cookies. Both are synced so gated tweets actually resolve.
+    const domains = ['youtube.com', 'instagram.com', 'twitter.com', 'x.com']
     let ok = true
     for (const d of domains) {
       const result = await chrome.runtime.sendMessage({ action: 'syncCookies', domain: d })
@@ -42,7 +44,7 @@ async function init() {
     status.style.display = 'block'
     if (ok) {
       status.className = 'status success'
-      status.textContent = 'Cookies synced for YouTube, Instagram & Twitter!'
+      status.textContent = 'Cookies synced for YouTube, Instagram & X!'
       btn.innerHTML = 'Synced!'
     } else {
       status.className = 'status error'

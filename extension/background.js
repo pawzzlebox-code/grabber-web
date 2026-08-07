@@ -12,7 +12,12 @@ chrome.runtime.onInstalled.addListener(() => {
 // Handle cookie sync alarm
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'cookie-sync') {
-    for (const domain of ['youtube.com', 'instagram.com', 'twitter.com']) {
+    // x.com is listed separately from twitter.com: since the rebrand the
+    // login cookies (auth_token / ct0) live on .x.com, while twitter.com
+    // only keeps guest cookies. Syncing twitter.com alone left the server
+    // logged out, so anything gated (sensitive media, protected accounts)
+    // came back as "No video could be found in this tweet".
+    for (const domain of ['youtube.com', 'instagram.com', 'twitter.com', 'x.com']) {
       await syncCookiesToDesktop(domain)
     }
     console.log('[Grabber Helper] Auto-synced cookies')
@@ -49,6 +54,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       } else if (host.includes('instagram.com')) {
         await syncCookiesToDesktop('instagram.com')
       } else if (host.includes('twitter.com') || host.includes('x.com')) {
+        // Both, in this order — x.com carries the actual login.
+        await syncCookiesToDesktop('x.com')
         await syncCookiesToDesktop('twitter.com')
       }
     } catch {}
