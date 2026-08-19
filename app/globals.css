@@ -160,13 +160,16 @@ button:active:not(:disabled) {
   border-color: var(--lo) var(--hi) var(--hi) var(--lo);
   color: var(--ink);
 }
+/* Checked state is a hard black square, not a tick — a checkmark is a modern
+   vector glyph that reads as out-of-place next to the beveled pixel controls.
+   A solid block is what a fantasy-console UI would actually draw. */
 .cb-box::after {
   content: '';
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1;
+  width: 10px;
+  height: 10px;
+  background: transparent;
 }
-input:checked + .cb-box::after { content: '✓'; }
+input:checked + .cb-box::after { background: #000000; }
 input:focus-visible + .cb-box {
   outline: 2px dashed var(--ink);
   outline-offset: 2px;

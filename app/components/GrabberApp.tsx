@@ -57,7 +57,11 @@ function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
   try {
     const s = localStorage.getItem('grabber-settings')
-    return s ? { ...defaultSettings, ...JSON.parse(s) } : defaultSettings
+    // photoMode is deliberately NOT restored: it routes every URL through
+    // gallery-dl instead of yt-dlp, so leaving it on from a previous session
+    // silently breaks the next ordinary video paste. It's a per-session mode —
+    // opt in each time, off on every reload.
+    return s ? { ...defaultSettings, ...JSON.parse(s), photoMode: false } : defaultSettings
   } catch { return defaultSettings }
 }
 
