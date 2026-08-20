@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { isWebCodecsSupported } from '@/lib/webcodecs-processor'
 import { runWorker } from '@/lib/webcodecs-client'
+import UploadPanel from './UploadPanel'
 
 interface VideoInfo {
   id: string
@@ -1561,6 +1562,13 @@ export default function GrabberApp() {
               <X size={14} />
             </button>
           </div>
+        )}
+
+        {/* Upload & Process — the local-file counterpart to the URL box above.
+            Hidden once a URL fetch is in play so the two flows never compete
+            for attention. */}
+        {videos.length === 0 && !loading && (
+          <UploadPanel />
         )}
 
         {/* Skeleton while fetching — a ghost of the result card so the wait
