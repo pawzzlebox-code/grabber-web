@@ -5,14 +5,14 @@ import { v4 as uuid } from 'uuid'
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { url, formatId, title, thumbnail, playlistIndex, verticalPad, duration, burnSubtitles, instantMode } = body
+    const { url, formatId, title, thumbnail, playlistIndex, verticalPad, duration, burnSubtitles, instantMode, referer } = body
 
     if (!url) {
       return NextResponse.json({ error: 'Missing url' }, { status: 400 })
     }
 
     const id = uuid()
-    startDownload(id, url, formatId, title, thumbnail, playlistIndex, verticalPad, duration, burnSubtitles, instantMode)
+    startDownload(id, url, formatId, title, thumbnail, playlistIndex, verticalPad, duration, burnSubtitles, instantMode, referer)
 
     return NextResponse.json({ id })
   } catch (err: any) {

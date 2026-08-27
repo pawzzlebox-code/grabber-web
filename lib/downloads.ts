@@ -516,7 +516,7 @@ function buildVideoInfo(json: any, twitter: boolean, fallbackUrl: string, index?
   }
 }
 
-export async function fetchVideoInfo(url: string, attempt = 0, forceCookies = false): Promise<VideoInfo[]> {
+export async function fetchVideoInfo(url: string, attempt = 0, forceCookies = false, referer?: string): Promise<VideoInfo[]> {
   if (isChannelOrPlaylist(url)) {
     throw new Error('Channel and playlist URLs are not supported. Please paste a link to a specific video.')
   }
@@ -546,7 +546,7 @@ export async function fetchVideoInfo(url: string, attempt = 0, forceCookies = fa
     }, 30000)
 
     const cancel = dispatchExtractInfo(
-      { job_id: jobId, url, proxy, cookies, no_playlist: !twitter },
+      { job_id: jobId, url, proxy, cookies, no_playlist: !twitter, referer },
       {
         onInfo: (info) => {
           if (settled) return
@@ -579,13 +579,13 @@ export async function fetchVideoInfo(url: string, attempt = 0, forceCookies = fa
           // the cookie file before burning normal retry slots.
           if (!forceCookies && !cookies && isInstagramUrl(url) && cookieArgs().length > 0 && IG_COOKIE_RESCUE.test(message)) {
             console.log('[info] Instagram anonymous fetch blocked — retrying with login cookies')
-            fetchVideoInfo(url, attempt, true).then(resolve).catch(reject)
+            fetchVideoInfo(url, attempt, true, referer).then(resolve).catch(reject)
             return
           }
           if (attempt < MAX_RETRIES && isRetryable(message)) {
             console.log(`[info] Retrying (${attempt + 2}/${MAX_RETRIES + 1})...`)
             setTimeout(() => {
-              fetchVideoInfo(url, attempt + 1, forceCookies).then(resolve).catch(reject)
+              fetchVideoInfo(url, attempt + 1, forceCookies, referer).then(resolve).catch(reject)
             }, RETRY_DELAY_MS * (attempt + 1))
             return
           }
@@ -1200,7 +1200,7 @@ async function generateSubtitlesOnly(job: DownloadJob, onComplete: () => void): 
   }
 }
 
-export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number, verticalPad?: boolean, duration?: number, burnSubtitles?: boolean, instantMode?: boolean): DownloadJob {
+export function startDownload(id: string, url: string, formatId?: string, title?: string, thumbnail?: string, playlistIndex?: number, verticalPad?: boolean, duration?: number, burnSubtitles?: boolean, instantMode?: boolean, referer?: string): DownloadJob {
   const job: DownloadJob = {
     id, url,
     title: title || 'Downloading...',
@@ -1327,6 +1327,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         playlist_items: (!twitter || playlistIndex === undefined) ? undefined : playlistIndex,
         no_playlist: !twitter,
         audio_only: audioOnly,
+        referer,
       },
       {
         onStatus: (message) => {

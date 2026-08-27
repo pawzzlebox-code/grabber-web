@@ -40,6 +40,34 @@ class JobContext:
         self.final_filepath = None
 
 
+def build_http_headers(cmd):
+    """Optional per-request headers for direct media links.
+
+    A CDN serving a raw .m3u8/.mp4 typically checks Referer (and sometimes
+    Origin) against the page that embedded it. A browser sends those for free;
+    a server-side fetch has to supply them explicitly or the CDN returns 403.
+    Only headers the caller actually provided are set, so ordinary extractor
+    downloads keep yt-dlp's own defaults.
+    """
+    headers = {}
+    referer = (cmd.get('referer') or '').strip()
+    if referer:
+        headers['Referer'] = referer
+        # Origin is the scheme+host of the referring page; some CDNs check it
+        # instead of, or as well as, Referer.
+        try:
+            from urllib.parse import urlparse
+            parts = urlparse(referer)
+            if parts.scheme and parts.netloc:
+                headers['Origin'] = f'{parts.scheme}://{parts.netloc}'
+        except Exception:
+            pass
+    user_agent = (cmd.get('user_agent') or '').strip()
+    if user_agent:
+        headers['User-Agent'] = user_agent
+    return headers
+
+
 def make_progress_hook(ctx):
     def hook(d):
         status = d.get('status')
@@ -164,6 +192,12 @@ def run_download(cmd):
         opts['proxy'] = cmd['proxy']
     if cmd.get('cookies'):
         opts['cookiefile'] = cmd['cookies']
+    # Direct media links (.m3u8/.mp4 pasted straight in) usually sit behind a
+    # CDN that only answers requests carrying the referring page's headers.
+    # A browser sends those automatically; a server fetch has to be told.
+    hdrs = build_http_headers(cmd)
+    if hdrs:
+        opts['http_headers'] = hdrs
 
     emit({'type': 'status', 'job_id': ctx.job_id, 'message': 'Extracting...'})
 
@@ -210,6 +244,9 @@ def run_extract_info(cmd):
         opts['proxy'] = cmd['proxy']
     if cmd.get('cookies'):
         opts['cookiefile'] = cmd['cookies']
+    hdrs = build_http_headers(cmd)
+    if hdrs:
+        opts['http_headers'] = hdrs
 
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(cmd['url'], download=False)

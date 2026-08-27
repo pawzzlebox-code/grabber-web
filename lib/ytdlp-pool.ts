@@ -20,6 +20,11 @@ export interface DownloadCommand {
   cookies?: string
   playlist_items?: string | number
   no_playlist: boolean
+  // Direct-link support: a raw .m3u8/.mp4 usually sits behind a CDN that
+  // checks the referring page's headers. Browsers send these automatically;
+  // a server fetch must be told. Ignored for normal extractor downloads.
+  referer?: string
+  user_agent?: string
   // When true, the worker adds an FFmpegExtractAudio postprocessor so the
   // output is MP3 (192 kbps) instead of the raw audio container yt-dlp
   // would otherwise download (webm/m4a). Required for CapCut compatibility.
@@ -42,6 +47,8 @@ export interface ExtractInfoCommand {
   proxy?: string
   cookies?: string
   no_playlist: boolean
+  referer?: string
+  user_agent?: string
 }
 
 export interface WorkerMsg {

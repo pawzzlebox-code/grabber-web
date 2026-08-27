@@ -158,6 +158,20 @@ function ProgressRing({ percent, size = 26, stroke = 3 }: { percent: number; siz
   )
 }
 
+// A link straight to a media file, rather than a page a site extractor knows
+// how to read. These need the referring page's headers to fetch server-side,
+// so the UI offers a Referer field when it sees one.
+function isDirectMediaUrl(raw: string): boolean {
+  const value = raw.trim()
+  if (!/^https?:\/\//i.test(value)) return false
+  try {
+    const path = new URL(value).pathname.toLowerCase()
+    return /\.(m3u8|mpd|mp4|mkv|webm|mov|m4v|ts|flv)$/.test(path) || path.includes('/m3u8')
+  } catch {
+    return false
+  }
+}
+
 // 5×7 bitmap glyphs for the hero wordmark — drawn on canvas so the pixels
 // stay hard-edged at any DPR (a webfont would anti-alias).
 const WORDMARK_GLYPHS: Record<string, string[]> = {
@@ -222,6 +236,10 @@ function PixelWordmark() {
 
 export default function GrabberApp() {
   const [url, setUrl] = useState('')
+  // Optional Referer for direct media links (.m3u8/.mp4 pasted straight in).
+  // Those CDNs usually check the referring page's headers, which a browser
+  // sends for free but a server-side fetch has to be told.
+  const [referer, setReferer] = useState('')
   const [videos, setVideos] = useState<VideoInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -619,7 +637,8 @@ export default function GrabberApp() {
     const timeoutId = setTimeout(() => ac.abort(), 45_000)
 
     try {
-      const res = await fetch(`${apiBase()}/api/info?url=${encodeURIComponent(trimmedUrl)}`, {
+      const refQ = referer.trim() ? `&referer=${encodeURIComponent(referer.trim())}` : ''
+      const res = await fetch(`${apiBase()}/api/info?url=${encodeURIComponent(trimmedUrl)}${refQ}`, {
         headers: apiHeaders(false),
         signal: ac.signal,
       })
@@ -732,6 +751,7 @@ export default function GrabberApp() {
           duration: video.duration,
           burnSubtitles: settings.burnSubtitles,
           instantMode: useInstant,
+          referer: referer.trim() || undefined,
         }),
       })
       const data = await res.json()
@@ -1522,6 +1542,28 @@ export default function GrabberApp() {
               <ClipboardPaste size={18} />
             </button>
           </div>
+
+          {/* Direct media links only. A .m3u8/.mp4 pasted straight in usually
+              comes from a CDN that checks the referring page's headers — a
+              browser sends those automatically, a server fetch has to be told.
+              Hidden for normal site URLs, where the extractor handles it. */}
+          {isDirectMediaUrl(url) && (
+            <div className="space-y-1">
+              <input
+                type="url"
+                value={referer}
+                onChange={(e) => setReferer(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && fetchInfo(url)}
+                placeholder="Referer — the page this link came from (optional)"
+                className="w-full h-9 inset-field px-3 text-xs outline-none transition-colors"
+              />
+              <p className="text-[10px] text-text-muted">
+                Direct link detected. If it fails, paste the page URL above — many CDNs
+                reject requests without it. Signed links can also be IP-bound or expire.
+              </p>
+            </div>
+          )}
+
           <div className="flex gap-2">
             {/* Fetch — PRIMARY action: the first thing a visitor taps, so it
                 gets the solid accent treatment. */}

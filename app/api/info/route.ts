@@ -8,7 +8,9 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const videos = await fetchVideoInfo(url)
+    // Optional Referer for direct media links whose CDN checks it.
+    const referer = req.nextUrl.searchParams.get('referer') || undefined
+    const videos = await fetchVideoInfo(url, 0, false, referer)
     // Return { videos: [...] } for multi-video support
     return NextResponse.json({ videos })
   } catch (err: any) {
