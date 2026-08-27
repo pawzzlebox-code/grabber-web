@@ -8,6 +8,7 @@ import {
 import { isWebCodecsSupported } from '@/lib/webcodecs-processor'
 import { runWorker } from '@/lib/webcodecs-client'
 import UploadPanel from './UploadPanel'
+import SharePanel from './SharePanel'
 
 interface VideoInfo {
   id: string
@@ -1568,7 +1569,10 @@ export default function GrabberApp() {
             Hidden once a URL fetch is in play so the two flows never compete
             for attention. */}
         {videos.length === 0 && !loading && (
-          <UploadPanel />
+          <>
+            <UploadPanel />
+            <SharePanel />
+          </>
         )}
 
         {/* Skeleton while fetching — a ghost of the result card so the wait
