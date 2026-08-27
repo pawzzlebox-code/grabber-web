@@ -3,6 +3,7 @@ import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { dispatchDownload, dispatchExtractInfo, poolStats } from './ytdlp-pool'
+import { registerDownload } from './gallery'
 
 export interface VideoInfo {
   id: string
@@ -291,7 +292,11 @@ setInterval(() => {
 // leaving any in-flight files as permanent orphans. This walks TEMP_DIR
 // every 10 min and deletes files older than 60 min regardless of Map
 // state, preserving cookies.txt and any in-progress downloads.
-const ORPHAN_MAX_AGE_MS = 60 * 60 * 1000
+// Raised from 60 min to match the gallery's 24h retention: a finished
+// download now stays browsable (and shareable) for a day, so the sweeper
+// must not delete it out from under the gallery index. Files promoted to a
+// public share are moved into ~/.grabber-gallery entirely, out of reach here.
+const ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000
 setInterval(() => {
   if (!fs.existsSync(TEMP_DIR)) return
   let entries: string[]
@@ -323,6 +328,15 @@ export function deleteDownload(id: string) {
   }
   downloads.delete(id)
   console.log(`[cleanup] Deleted job ${id}`)
+}
+
+/**
+ * Drop the in-memory job but LEAVE the file on disk. Used once a download has
+ * been streamed to the client: the bytes now belong to the gallery (24h, or
+ * forever once shared), so deleting them here would defeat that.
+ */
+export function forgetJob(id: string) {
+  if (downloads.delete(id)) console.log(`[cleanup] Released job ${id} (file kept for gallery)`)
 }
 
 export function getAllDownloads(): DownloadJob[] {
@@ -1363,6 +1377,18 @@ export function startDownload(id: string, url: string, formatId?: string, title?
           const runDone = () => {
             job.status = 'done'
             job.percent = 100
+            // Put the finished file in the gallery so it's still there when
+            // you come back later — and can be promoted to a public share
+            // without re-uploading anything.
+            try {
+              registerDownload({
+                id,
+                title: job.title,
+                thumbnail: job.thumbnail,
+                fileName: job.fileName || path.basename(job.filePath || ''),
+                filePath: job.filePath!,
+              })
+            } catch {}
             notify(job, { type: 'done', fileName: job.fileName! })
           }
 

@@ -3,12 +3,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ClipboardPaste, Download, Loader, AlertCircle,
-  X, Settings, ChevronDown, Trash2, RefreshCw
+  X, Settings, ChevronDown, Trash2, RefreshCw, Images
 } from 'lucide-react'
 import { isWebCodecsSupported } from '@/lib/webcodecs-processor'
 import { runWorker } from '@/lib/webcodecs-client'
 import UploadPanel from './UploadPanel'
-import SharePanel from './SharePanel'
+import GallerySheet from './GallerySheet'
 
 interface VideoInfo {
   id: string
@@ -220,25 +220,6 @@ function PixelWordmark() {
   return <canvas ref={ref} className="mx-auto" style={{ imageRendering: 'pixelated' }} role="img" aria-label="Grabber" />
 }
 
-// Live console clock in the toolbar — starts empty so SSR and the first
-// client render match (no hydration mismatch).
-const CLOCK_DAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
-const CLOCK_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
-function ToolbarClock() {
-  const [now, setNow] = useState('')
-  useEffect(() => {
-    const tick = () => {
-      const d = new Date()
-      const p = (n: number) => String(n).padStart(2, '0')
-      setNow(`${CLOCK_DAYS[d.getDay()]} ${p(d.getDate())} ${CLOCK_MONTHS[d.getMonth()]} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`)
-    }
-    tick()
-    const t = setInterval(tick, 1000)
-    return () => clearInterval(t)
-  }, [])
-  return <span className="tabular-nums">{now}</span>
-}
-
 export default function GrabberApp() {
   const [url, setUrl] = useState('')
   const [videos, setVideos] = useState<VideoInfo[]>([])
@@ -247,6 +228,7 @@ export default function GrabberApp() {
   const [downloads, setDownloads] = useState<DownloadJob[]>([])
   const [settings, setSettings] = useState(defaultSettings)
   const [showSettings, setShowSettings] = useState(false)
+  const [showGallery, setShowGallery] = useState(false)
   const [selectedFormats, setSelectedFormats] = useState<Record<string, string>>({})
   const lastClipboard = useRef('')
   const autoTriggered = useRef(false)
@@ -1270,7 +1252,13 @@ export default function GrabberApp() {
           <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="cursor-pointer hover:text-danger transition-colors py-1.5">
             Build {process.env.NEXT_PUBLIC_BUILD || 'dev'}
           </span>
-          <ToolbarClock />
+          <button
+            onClick={() => setShowGallery(true)}
+            className="raised px-2.5 py-1 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+            title="Files on the server"
+          >
+            <span className="inline-flex items-center gap-1.5"><Images size={12} /> Gallery</span>
+          </button>
           <button
             onClick={() => setShowSettings(!showSettings)}
             className="raised px-2.5 py-1 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
@@ -1280,6 +1268,10 @@ export default function GrabberApp() {
           </button>
         </div>
       </header>
+
+      {/* Gallery — same slide-up treatment as Settings. Lists what's actually
+          on the server so it can be shared or deleted from one place. */}
+      {showGallery && <GallerySheet onClose={() => setShowGallery(false)} />}
 
       {/* Settings — bottom sheet: slides up over the page like a native app
           instead of shoving the content down. Tap the dimmed backdrop (or the
@@ -1571,7 +1563,6 @@ export default function GrabberApp() {
         {videos.length === 0 && !loading && (
           <>
             <UploadPanel />
-            <SharePanel />
           </>
         )}
 

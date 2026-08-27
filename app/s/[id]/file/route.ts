@@ -1,36 +1,33 @@
 // PUBLIC download endpoint — reachable without the site token.
 //
-// The unguessable 32-hex id in the URL is the only credential. An id that
-// doesn't match returns a bare 404, so a wrong or revoked link is
+// The unguessable 32-hex token in the URL is the only credential. A token that
+// doesn't match returns a bare 404, so a wrong, revoked or expired link is
 // indistinguishable from one that never existed.
 //
 // Range requests are honoured so a dropped transfer resumes instead of
-// restarting — the link to this server is slow enough that restarting a
-// half-finished multi-hundred-MB download is genuinely painful.
+// restarting — international throughput here is ~500 KB/s, which makes
+// restarting a half-finished download genuinely painful.
 //
-// Responses are explicitly NOT cacheable: you can revoke a share at any time,
-// and an edge-cached copy would keep serving a file you deleted.
+// Responses are explicitly NOT cacheable: you can revoke or delete a share at
+// any time, and an edge-cached copy would keep serving a file you removed.
 
 import { NextRequest } from 'next/server'
 import fs from 'fs'
-import { getShare, sharePath, recordDownload } from '@/lib/shares'
+import { getByShareToken, recordShareDownload } from '@/lib/gallery'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
-  const share = getShare(params.id)
-  if (!share) return new Response('Not found', { status: 404 })
+  const item = getByShareToken(params.id)
+  if (!item) return new Response('Not found', { status: 404 })
+  if (!fs.existsSync(item.filePath)) return new Response('Not found', { status: 404 })
 
-  const filePath = sharePath(share)
-  if (!fs.existsSync(filePath)) return new Response('Not found', { status: 404 })
-
-  const total = fs.statSync(filePath).size
+  const total = fs.statSync(item.filePath).size
   const range = req.headers.get('range')
-  const disposition = `attachment; filename*=UTF-8''${encodeURIComponent(share.name)}`
 
-  const baseHeaders: Record<string, string> = {
-    'Content-Type': share.mime,
-    'Content-Disposition': disposition,
+  const headers: Record<string, string> = {
+    'Content-Type': 'video/mp4',
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(item.fileName)}`,
     'Accept-Ranges': 'bytes',
     'Cache-Control': 'no-store, must-revalidate',
   }
@@ -51,15 +48,15 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
         })
       }
       status = 206
-      baseHeaders['Content-Range'] = `bytes ${start}-${end}/${total}`
+      headers['Content-Range'] = `bytes ${start}-${end}/${total}`
     }
   }
 
-  // Only count a download when the whole file is requested from the start,
-  // so a browser probing with a range request doesn't inflate the counter.
-  if (status === 200) recordDownload(share.id)
+  // Count a download only for a full request from the start, so a browser
+  // probing with range requests doesn't inflate the counter.
+  if (status === 200) recordShareDownload(item.shareToken!)
 
-  const nodeStream = fs.createReadStream(filePath, { start, end })
+  const nodeStream = fs.createReadStream(item.filePath, { start, end })
   const webStream = new ReadableStream({
     start(controller) {
       nodeStream.on('data', (chunk) => controller.enqueue(chunk))
@@ -71,6 +68,6 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
   return new Response(webStream, {
     status,
-    headers: { ...baseHeaders, 'Content-Length': String(end - start + 1) },
+    headers: { ...headers, 'Content-Length': String(end - start + 1) },
   })
 }

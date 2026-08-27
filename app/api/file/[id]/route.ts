@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { getDownload, deleteDownload } from '@/lib/downloads'
+import { getDownload, forgetJob } from '@/lib/downloads'
 import fs from 'fs'
 import path from 'path'
 
@@ -43,11 +43,11 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
       stream.on('end', () => {
         streamComplete = true
         controller.close()
-        // Keep the file around for 5 min after the stream completes so the
-        // client can retry / fall back (e.g. WebCodecs failed mid-encode,
-        // user wants to switch to plain download). After that the orphan
-        // sweeper at 60 min handles permanent cleanup.
-        setTimeout(() => deleteDownload(jobId), 5 * 60 * 1000)
+        // The file itself is deliberately NOT deleted here any more: it stays
+        // on the server for 24h so it shows up in the Gallery, where it can be
+        // promoted to a public share without re-uploading. Expiry is handled
+        // by the gallery sweeper; only the in-memory job entry is dropped.
+        setTimeout(() => forgetJob(jobId), 5 * 60 * 1000)
       })
       stream.on('error', (err) => controller.error(err))
     },
