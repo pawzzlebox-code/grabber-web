@@ -1249,9 +1249,6 @@ export default function GrabberApp() {
           iPhone's home indicator was getting in the way of tapping it. */}
       <header className="w-full px-3 pt-3">
         <div className="toolbar flex items-center justify-between gap-2 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-primary">
-          <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="cursor-pointer hover:text-danger transition-colors py-1.5">
-            Build {process.env.NEXT_PUBLIC_BUILD || 'dev'}
-          </span>
           <button
             onClick={() => setShowGallery(true)}
             className="raised px-2.5 py-1 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
@@ -1259,6 +1256,9 @@ export default function GrabberApp() {
           >
             <span className="inline-flex items-center gap-1.5"><Images size={12} /> Gallery</span>
           </button>
+          <span onClick={() => { setShowDebug(s => !s); dumpServerDebug() }} className="cursor-pointer hover:text-danger transition-colors py-1.5">
+            Build {process.env.NEXT_PUBLIC_BUILD || 'dev'}
+          </span>
           <button
             onClick={() => setShowSettings(!showSettings)}
             className="raised px-2.5 py-1 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"

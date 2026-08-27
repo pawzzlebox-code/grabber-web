@@ -45,6 +45,10 @@ export default function GallerySheet({ onClose }: { onClose: () => void }) {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [error, setError] = useState('')
+  // In-app dialogs instead of confirm()/prompt(): the browser's own boxes are
+  // OS-chrome, ignore the theme, and announce the bare domain name.
+  const [confirming, setConfirming] = useState<GalleryItem | null>(null)
+  const [linkFallback, setLinkFallback] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -79,7 +83,9 @@ export default function GallerySheet({ onClose }: { onClose: () => void }) {
         setCopied(item.id)
         setTimeout(() => setCopied((c) => (c === item.id ? null : c)), 1800)
       } catch {
-        window.prompt('Copy this link:', link)
+        // Clipboard access is blocked in some contexts — show the link so it
+        // can be copied by hand instead of losing it.
+        setLinkFallback(link)
       }
       load()
     } catch (err: any) {
@@ -90,10 +96,7 @@ export default function GallerySheet({ onClose }: { onClose: () => void }) {
   }
 
   const remove = async (item: GalleryItem) => {
-    const warning = item.shareToken
-      ? `Delete "${item.title}"? Anyone holding the link will immediately lose access.`
-      : `Delete "${item.title}" from the server?`
-    if (!confirm(warning)) return
+    setConfirming(null)
     setBusyId(item.id)
     try {
       const res = await fetch(`/api/gallery/${item.id}`, { method: 'DELETE' })
@@ -167,7 +170,7 @@ export default function GallerySheet({ onClose }: { onClose: () => void }) {
                 </button>
 
                 <button
-                  onClick={() => remove(item)}
+                  onClick={() => setConfirming(item)}
                   disabled={busyId === item.id}
                   className="h-9 px-2.5 grid place-items-center raised transition-colors"
                   title="Delete from server"
@@ -186,6 +189,54 @@ export default function GallerySheet({ onClose }: { onClose: () => void }) {
           <X size={16} /> Close
         </button>
       </div>
+
+      {/* Delete confirmation — themed, and it names what's actually at stake
+          (a live link dying) rather than the browser's generic warning. */}
+      {confirming && (
+        <div className="absolute inset-0 z-10 grid place-items-center p-4" role="dialog" aria-modal="true">
+          <div className="absolute inset-0 bg-black/70" onClick={() => setConfirming(null)} />
+          <div className="panel relative p-5 w-full max-w-sm space-y-4">
+            <p className="pixel-head text-xs font-bold uppercase tracking-[0.24em]">Delete file</p>
+            <p className="text-sm text-text-primary break-words">{confirming.title}</p>
+            <p className="text-xs text-text-muted">
+              {confirming.shareToken
+                ? 'This file is shared. Anyone holding the link will lose access immediately.'
+                : 'This removes it from the server for good.'}
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirming(null)} className="flex-1 h-10 raised text-sm">
+                Cancel
+              </button>
+              <button
+                onClick={() => remove(confirming)}
+                className="flex-1 h-10 raised text-sm font-semibold"
+                style={{ background: 'var(--danger)', color: '#fff', textShadow: '1px 1px 0 rgba(0,0,0,0.4)' }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clipboard-blocked fallback: show the link so it can be copied by hand. */}
+      {linkFallback && (
+        <div className="absolute inset-0 z-10 grid place-items-center p-4" role="dialog" aria-modal="true">
+          <div className="absolute inset-0 bg-black/70" onClick={() => setLinkFallback('')} />
+          <div className="panel relative p-5 w-full max-w-sm space-y-3">
+            <p className="pixel-head text-xs font-bold uppercase tracking-[0.24em]">Copy this link</p>
+            <input
+              readOnly
+              value={linkFallback}
+              onFocus={(e) => e.currentTarget.select()}
+              className="inset-field w-full h-10 px-3 text-xs"
+            />
+            <button onClick={() => setLinkFallback('')} className="w-full h-10 raised text-sm">
+              Done
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
