@@ -16,7 +16,7 @@ import {
   EncodedAudioPacketSource,
   QUALITY_HIGH,
 } from 'mediabunny'
-import { parseSrt, findActiveSubtitle, splitLongCues, type Subtitle, type SubtitleStyle } from './srt-parser'
+import { parseSrt, splitLongCues, type Subtitle, type SubtitleStyle } from './srt-parser'
 import { POPPINS_BOLD_WOFF2_BASE64 } from './poppins-bold-data'
 
 export interface ProcessOptions {
@@ -147,14 +147,24 @@ export function wrapByWords(text: string, maxWordsPerLine: number): string[] {
   return lines
 }
 
-export function drawSubtitleOnCanvas(
-  ctx: OffscreenCanvasRenderingContext2D,
+interface SubtitleLayout {
+  lines: string[]
+  fontSize: number
+  lineHeight: number
+  firstLineBaseline: number
+  fontSpec: string
+  shadowOffsetY: number
+  shadowBlur: number
+}
+
+/** Where the caption block lands. Split out so the on-canvas painter and the
+ *  cached-layer renderer can never disagree about placement. */
+function computeSubtitleLayout(
   text: string,
-  cw: number,
   ch: number,
-  videoBottomY: number, // Y coordinate where the actual video frame ends (bottom edge of letterbox content)
-  style: SubtitleStyle = 'normal',
-) {
+  videoBottomY: number,
+  style: SubtitleStyle,
+): SubtitleLayout {
   // Netflix paces captions: max 4 words per line
   const lines = wrapByWords(text, 4)
   // Font size scales with canvas height
@@ -185,33 +195,103 @@ export function drawSubtitleOnCanvas(
     if (firstLineBaseline > maxBaseline) firstLineBaseline = maxBaseline
   }
 
-  ctx.save()
   // Per-cue styling: main speaker = bold (700), interviewer = italic, plain
   // Groq cues (no tag) = normal bold. Canvas synthesizes italic from Poppins
   // Bold when we pass `italic` + `700` — no separate italic font file needed.
   const isItalic = style === 'italic'
   const fontSpec = `${isItalic ? 'italic ' : ''}700 ${fontSize}px "Poppins", "Helvetica Neue", Arial, sans-serif`
+
+  return {
+    lines,
+    fontSize,
+    lineHeight,
+    firstLineBaseline,
+    fontSpec,
+    // Netflix-style soft drop shadow — no hard outline. Shadow params scale
+    // with font size so they look right at any canvas resolution.
+    shadowOffsetY: Math.max(2, Math.round(fontSize * 0.08)),
+    shadowBlur: Math.max(6, Math.round(fontSize * 0.22)),
+  }
+}
+
+/** Paint a laid-out caption. `yShift` moves it up when drawing into a band
+ *  bitmap whose origin isn't the canvas origin. */
+function paintSubtitle(
+  ctx: OffscreenCanvasRenderingContext2D,
+  layout: SubtitleLayout,
+  cw: number,
+  yShift = 0,
+) {
+  ctx.save()
   // Poppins is awaited before draw via ensurePoppinsLoaded. Fallback chain
   // handles the rare case where the font load failed entirely.
-  ctx.font = fontSpec
+  ctx.font = layout.fontSpec
   ctx.textAlign = 'center'
   ctx.textBaseline = 'bottom'
-
-  // Netflix-style soft drop shadow — no hard outline. Shadow params scale
-  // with font size so they look right at any canvas resolution.
   ctx.shadowColor = 'rgba(0, 0, 0, 0.85)'
   ctx.shadowOffsetX = 0
-  ctx.shadowOffsetY = Math.max(2, Math.round(fontSize * 0.08))
-  ctx.shadowBlur = Math.max(6, Math.round(fontSize * 0.22))
-
+  ctx.shadowOffsetY = layout.shadowOffsetY
+  ctx.shadowBlur = layout.shadowBlur
   ctx.fillStyle = '#ffffff'
 
   const cx = cw / 2
-  for (let i = 0; i < lines.length; i++) {
-    const y = firstLineBaseline + i * lineHeight
-    ctx.fillText(lines[i], cx, y)
+  for (let i = 0; i < layout.lines.length; i++) {
+    ctx.fillText(layout.lines[i], cx, layout.firstLineBaseline + i * layout.lineHeight - yShift)
   }
   ctx.restore()
+}
+
+export function drawSubtitleOnCanvas(
+  ctx: OffscreenCanvasRenderingContext2D,
+  text: string,
+  cw: number,
+  ch: number,
+  videoBottomY: number, // Y coordinate where the actual video frame ends (bottom edge of letterbox content)
+  style: SubtitleStyle = 'normal',
+) {
+  paintSubtitle(ctx, computeSubtitleLayout(text, ch, videoBottomY, style), cw)
+}
+
+/** A cue rendered once into its own bitmap, ready to be blitted each frame. */
+export interface CueLayer {
+  canvas: OffscreenCanvas
+  top: number
+}
+
+/**
+ * Render one cue into a strip bitmap.
+ *
+ * Text layout and a `shadowBlur` fill are among the most expensive things a
+ * 2D canvas can do, and a cue is on screen for ~60-90 frames — so doing this
+ * per frame repeats identical work dozens of times. Rendering once and
+ * blitting the result turns that into a single GPU copy. Only the band the
+ * text occupies is allocated, so the per-frame blit stays small.
+ */
+export function renderCueLayer(
+  text: string,
+  cw: number,
+  ch: number,
+  videoBottomY: number,
+  style: SubtitleStyle = 'normal',
+): CueLayer | null {
+  const layout = computeSubtitleLayout(text, ch, videoBottomY, style)
+  if (layout.lines.length === 0) return null
+
+  // Bounds of the block, plus room for the shadow to spill in every direction.
+  const spill = layout.shadowBlur + layout.shadowOffsetY + 4
+  const top = Math.max(0, Math.floor(layout.firstLineBaseline - layout.lineHeight - spill))
+  const bottom = Math.min(
+    ch,
+    Math.ceil(layout.firstLineBaseline + (layout.lines.length - 1) * layout.lineHeight + spill),
+  )
+  const height = bottom - top
+  if (height <= 0) return null
+
+  const canvas = new OffscreenCanvas(cw, height)
+  const ctx = canvas.getContext('2d', { alpha: true })
+  if (!ctx) return null
+  paintSubtitle(ctx, layout, cw, top)
+  return { canvas, top }
 }
 
 // --- Letterbox math (scale-fit into 9:16 canvas) ---
@@ -395,36 +475,64 @@ export async function processVideo(videoBlob: Blob, options: ProcessOptions): Pr
     //     refreshed, wiping the previous caption + its shadow spill).
     //   • bars without subtitles → a single clear is enough (static black bars).
     const hasBars = options.padTo9x16 && (drawX > 0 || drawY > 0 || drawW < outW || drawH < outH)
-    const clearEveryFrame = hasBars && subsActive
-    if (hasBars && !clearEveryFrame) {
+    // Paint the bars once. They sit outside the region the video repaints, so
+    // without this the side/top bars would never be filled at all.
+    if (hasBars) {
       ctx!.fillStyle = '#000000'
       ctx!.fillRect(0, 0, outW, outH)
     }
+    // When captions sit in the bottom bar, that strip is the only thing the
+    // video draw won't repaint — so it's the only thing that needs clearing
+    // each frame. Previously the whole canvas was refilled, which is a
+    // full-resolution fill per frame for a band a few hundred pixels tall.
+    const captionBandTop = drawY + drawH
+    const clearCaptionBand = hasBars && subsActive && captionBandTop < outH
     // Make sure the font is registered in self.fonts before we start drawing
     // so ctx.font with "Poppins" actually renders in Poppins (not system fallback).
     await fontReady
 
+    // The active cue changes every few seconds, so its bitmap is rendered once
+    // and reused for the ~60-90 frames it stays on screen.
+    let cueLayer: CueLayer | null = null
+    let cueIdx = -2 // -1 = no cue, -2 = nothing resolved yet
+    // Cues are sorted and playback only moves forward, so walking a cursor
+    // beats rescanning the whole list (hundreds of entries) every frame.
+    let cursor = 0
+    let lastTs = -1
+
     try {
       for await (const sample of vSink.samples()) {
-        // Wipe the bars before each frame when captions live in them, otherwise
-        // old subtitle pixels never get repainted (the video only covers the
-        // centre region).
-        if (clearEveryFrame) {
+        const ts = sample.microsecondTimestamp
+
+        if (subsActive) {
+          // A backwards timestamp means the cursor assumption broke; restart it.
+          if (ts < lastTs) cursor = 0
+          lastTs = ts
+          while (cursor < subs.length && subs[cursor].end < ts) cursor++
+          const idx = (cursor < subs.length && ts >= subs[cursor].start && ts <= subs[cursor].end)
+            ? cursor
+            : -1
+          if (idx !== cueIdx) {
+            cueIdx = idx
+            cueLayer = idx >= 0
+              ? renderCueLayer(subs[idx].text, outW, outH, drawY + drawH, subs[idx].style)
+              : null
+          }
+        }
+
+        // Only the caption strip needs wiping — the video draw below repaints
+        // everything it covers, and the other bars never change.
+        if (clearCaptionBand) {
           ctx!.fillStyle = '#000000'
-          ctx!.fillRect(0, 0, outW, outH)
+          ctx!.fillRect(0, captionBandTop, outW, outH - captionBandTop)
         }
 
         // Draw source frame at letterbox position.
         sample.draw(ctx!, drawX, drawY, drawW, drawH)
 
-        // Subtitle overlay
-        if (subsActive) {
-          const ts = sample.microsecondTimestamp
-          const active = findActiveSubtitle(subs, ts)
-          if (active) {
-            drawSubtitleOnCanvas(ctx!, active.text, outW, outH, drawY + drawH, active.style)
-          }
-        }
+        // Blit the pre-rendered caption (cheap) instead of re-laying out text
+        // and re-running a shadow blur on every frame.
+        if (cueLayer) ctx!.drawImage(cueLayer.canvas, 0, cueLayer.top)
 
         // Encode from canvas (mediabunny handles VideoFrame creation + encoder feeding)
         await canvasSource!.add(sample.timestamp, sample.duration)
