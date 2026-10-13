@@ -345,6 +345,46 @@ input:disabled + .cb-box { opacity: 0.6; }
 
   /* Failed: the picture tears and jumps sideways. */
   .scan-glitch { animation: scan-glitch 1.1s steps(1) infinite; }
+
+  /* Photo card (PhotoCard.tsx): a contact sheet of mini scan banners. */
+  .psheet {
+    display: grid;
+    gap: 4px;
+    padding: 4px;
+    background: var(--track);
+    border: 2px solid;
+    border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+  }
+  .ptile { position: relative; aspect-ratio: 1; overflow: hidden; background: var(--track); }
+  .ptile.ptile-wide { aspect-ratio: 4 / 3; }
+  .ptile::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.18) 0 1px, transparent 1px 3px);
+  }
+  /* Unticked: dimmed to grey, so the save count's meaning is visible. */
+  .ptile-off .scan-layer { filter: grayscale(1) brightness(0.55); }
+  .ptile-badge {
+    position: absolute;
+    z-index: 2;
+    padding: 2px 4px;
+    background: rgba(8, 9, 11, 0.78);
+    color: var(--head-white);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .ptile-tl { left: 4px; top: 4px; }
+  .ptile-br { right: 4px; bottom: 4px; }
+  .ptile-badge.ptile-codec { background: #8a5a12; }
+  .ptile-badge.ptile-bad { background: var(--danger); }
+  .ptile-check { position: absolute; z-index: 2; right: 4px; top: 4px; cursor: pointer; }
+  /* A button standing in for the checkbox, so tick state is a class. */
+  .cb-box.is-on::after { background: #000000; }
 }
 
 @keyframes scan-noise {

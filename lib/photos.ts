@@ -15,17 +15,38 @@ export interface PhotoFile {
   name: string
   size: number
   fullPath: string
+  kind: 'photo' | 'video'
+  // Videos only, from ffprobe shortly after the file lands. The phone uses the
+  // codec to decide whether iOS Photos needs a re-encode (VP9/AV1 → H.264).
+  codec?: string
+  duration?: number
+  // A 32px square preview, so the phone can draw the item's tile (pixelated,
+  // scanning in) before the full file has arrived. Videos also get a poster
+  // frame for the finished tile, since an <img> can't show an MP4.
+  thumbPath?: string
+  posterPath?: string
 }
 
 export interface PhotoJob {
   id: string
   url: string
+  // 'done' is only set once every file has been probed and previewed — the
+  // client stops polling at 'done', and needs each video's codec by then.
   status: 'downloading' | 'done' | 'error'
   files: PhotoFile[]
   error?: string
   createdAt: number
   proc?: ChildProcess
+  // From gallery-dl's per-file metadata (--write-metadata).
+  author?: string     // "@handle"
+  site?: string       // gallery-dl category: instagram, twitter, …
+  expected?: number   // items the post claims to have — a hint, it can overcount
+  // Serialises ffprobe/ffmpeg work for this job: the droplet has one vCPU and
+  // a carousel can land several files at once.
+  prep?: Promise<void>
 }
+
+const VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv'])
 
 const photoJobs = new Map<string, PhotoJob>()
 const PHOTOS_DIR = path.join(os.tmpdir(), 'grabber-photos')
@@ -162,6 +183,53 @@ function freeDiskBytes(): number | null {
   return null
 }
 
+function run(cmd: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    const proc = spawn(cmd, args)
+    let stdout = ''
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
+    proc.on('error', () => resolve({ code: -1, stdout }))
+    proc.on('close', (code) => resolve({ code, stdout }))
+  })
+}
+
+// gallery-dl writes "<file>.json" beside each file. One is enough for the post
+// fields; keep trying until a file's metadata turns up.
+function readMetadata(job: PhotoJob, file: PhotoFile) {
+  if (job.author && job.site && job.expected) return
+  try {
+    const meta = JSON.parse(fs.readFileSync(file.fullPath + '.json', 'utf-8'))
+    const handle = meta.username || meta.author?.name || meta.user?.name || meta.owner?.username
+    if (handle && !job.author) job.author = '@' + String(handle).replace(/^@/, '')
+    if (meta.category && !job.site) job.site = String(meta.category)
+    if (Number(meta.count) > 0 && !job.expected) job.expected = Number(meta.count)
+  } catch {}
+}
+
+function prepareFile(job: PhotoJob, file: PhotoFile) {
+  job.prep = (job.prep || Promise.resolve()).then(async () => {
+    readMetadata(job, file)
+    if (file.kind === 'video') {
+      const probe = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=codec_name:format=duration', '-of', 'json', file.fullPath])
+      try {
+        const j = JSON.parse(probe.stdout)
+        file.codec = j.streams?.[0]?.codec_name
+        const d = parseFloat(j.format?.duration)
+        if (isFinite(d)) file.duration = d
+      } catch {}
+      const poster = file.fullPath + '.poster.jpg'
+      const p = await run('ffmpeg', ['-v', 'error', '-y', '-ss', '0.1', '-i', file.fullPath,
+        '-frames:v', '1', '-vf', 'scale=480:-2', poster])
+      if (p.code === 0 && fs.existsSync(poster)) file.posterPath = poster
+    }
+    const thumb = file.fullPath + '.thumb.jpg'
+    const t = await run('ffmpeg', ['-v', 'error', '-y', '-i', file.posterPath || file.fullPath,
+      '-frames:v', '1', '-vf', 'scale=32:32:force_original_aspect_ratio=increase,crop=32:32', thumb])
+    if (t.code === 0 && fs.existsSync(thumb)) file.thumbPath = thumb
+  }).catch(() => {})
+}
+
 export function startPhotoJob(id: string, url: string): PhotoJob {
   const jobDir = path.join(PHOTOS_DIR, id)
   if (!fs.existsSync(jobDir)) fs.mkdirSync(jobDir, { recursive: true })
@@ -190,6 +258,8 @@ export function startPhotoJob(id: string, url: string): PhotoJob {
     // Flatten so all files land directly in jobDir, no nested extractor
     // subdirs. Easier to enumerate + serve.
     '-D', jobDir,
+    // "<file>.json" per file: the author, site and item count for the card.
+    '--write-metadata',
     ...cookieArgs(),
     ...proxyArgs(url),
   ]
@@ -217,11 +287,14 @@ export function startPhotoJob(id: string, url: string): PhotoJob {
         if (!fs.existsSync(candidate)) continue
         let size = 0
         try { size = fs.statSync(candidate).size } catch {}
-        job.files.push({
+        const file: PhotoFile = {
           name: path.basename(candidate),
           size,
           fullPath: candidate,
-        })
+          kind: VIDEO_EXT.has(path.extname(candidate).toLowerCase()) ? 'video' : 'photo',
+        }
+        job.files.push(file)
+        prepareFile(job, file)
       }
     }
   })
@@ -242,18 +315,24 @@ export function startPhotoJob(id: string, url: string): PhotoJob {
 
   proc.on('close', (code) => {
     job.proc = undefined
-    if (code === 0 && job.files.length > 0) {
-      job.status = 'done'
-      console.log(`[photos] job ${id} done — ${job.files.length} files`)
-    } else if (code === 0 && job.files.length === 0) {
-      job.status = 'error'
-      job.error = 'gallery-dl found nothing — site unsupported or content private'
-    } else {
-      job.status = 'error'
-      const errLine = stderr.split('\n').filter(l => l.toLowerCase().includes('error')).pop()
-        || stderr.trim().split('\n').pop() || ''
-      job.error = errLine.trim() || `gallery-dl exited with code ${code}`
+    const finish = () => {
+      // A file whose metadata wasn't written yet when it was first prepared.
+      for (const f of job.files) readMetadata(job, f)
+      if (code === 0 && job.files.length > 0) {
+        job.status = 'done'
+        console.log(`[photos] job ${id} done — ${job.files.length} files`)
+      } else if (code === 0 && job.files.length === 0) {
+        job.status = 'error'
+        job.error = 'gallery-dl found nothing — site unsupported or content private'
+      } else {
+        job.status = 'error'
+        const errLine = stderr.split('\n').filter(l => l.toLowerCase().includes('error')).pop()
+          || stderr.trim().split('\n').pop() || ''
+        job.error = errLine.trim() || `gallery-dl exited with code ${code}`
+      }
     }
+    // Wait for the last files' probes and previews before calling it done.
+    ;(job.prep || Promise.resolve()).then(finish, finish)
   })
 
   return job

@@ -9,6 +9,8 @@ import { isWebCodecsSupported } from '@/lib/webcodecs-processor'
 import { runWorker } from '@/lib/webcodecs-client'
 import UploadPanel from './UploadPanel'
 import GallerySheet from './GallerySheet'
+import PhotoCard, { type PhotoCardJob, type PhotoFile, type PhotoItem } from './PhotoCard'
+import { noiseTile } from '@/lib/scan-noise'
 
 interface VideoInfo {
   id: string
@@ -43,6 +45,8 @@ interface DownloadJob {
   // The phone is fetching the file straight from the source's CDN; there is
   // no server-side job, so nothing to poll, cancel or re-fetch on the server.
   direct?: boolean
+  // When the job was started here — orders video and photo cards in one list.
+  startedAt?: number
   // Share of the "Downloading" bar given to the phone pulling the file from
   // the server. The server's download and that transfer show as one 0–100%
   // run when nothing happens between them; 0 keeps them as separate steps.
@@ -55,7 +59,7 @@ interface DownloadJob {
 // the user has a desktopKey saved; else WebCodecs if the browser supports
 // it; else server-side. desktopKey moves to "Advanced" since most users
 // won't configure it, and direct download joins it there.
-const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '', skipDesktop: false, photoMode: false }
+const defaultSettings = { autoDetect: true, autoBest: true, verticalPad: false, burnSubtitles: false, directDownload: false, desktopKey: '', skipDesktop: false }
 
 // Above this size we never buffer the file into a JS Blob (for navigator.share
 // / WebCodecs). Holding a few hundred MB in a tab OOM-crashes the renderer —
@@ -68,11 +72,12 @@ function loadSettings() {
   if (typeof window === 'undefined') return defaultSettings
   try {
     const s = localStorage.getItem('grabber-settings')
-    // photoMode is deliberately NOT restored: it routes every URL through
-    // gallery-dl instead of yt-dlp, so leaving it on from a previous session
-    // silently breaks the next ordinary video paste. It's a per-session mode —
-    // opt in each time, off on every reload.
-    return s ? { ...defaultSettings, ...JSON.parse(s), photoMode: false } : defaultSettings
+    // A photoMode key saved by older builds is dropped: photo posts now route
+    // to gallery-dl on their own (fetchInfo).
+    if (!s) return defaultSettings
+    const saved = JSON.parse(s)
+    delete saved.photoMode
+    return { ...defaultSettings, ...saved }
   } catch { return defaultSettings }
 }
 
@@ -108,6 +113,21 @@ function formatEta(seconds: number): string {
   const s = Math.ceil(seconds)
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
+
+// instagram.com/p/<code>, also the instagram.com/<user>/p/<code> form.
+function isInstagramPostUrl(url: string): boolean {
+  return /^https?:\/\/(?:www\.)?instagram\.com\/(?:[^/?#]+\/)?p\/[\w-]+/i.test(url)
+}
+
+// A link straight to an image file. yt-dlp's generic extractor "succeeds" on
+// these with no formats at all, so they'd show as a broken video card;
+// gallery-dl's directlink extractor saves them properly.
+function isImageLink(url: string): boolean {
+  try { return /\.(jpe?g|png|webp|gif|heic|avif)$/i.test(new URL(url).pathname) } catch { return false }
+}
+
+// yt-dlp's wordings for "this post has no video" — see fetchInfo.
+const NO_VIDEO_HERE = /no video could be found|there is no video|unsupported url/i
 
 function isTwitterUrl(url: string): boolean {
   try {
@@ -251,25 +271,6 @@ type ScanMode = 'tuning' | 'download' | 'convert' | 'prepare' | 'ready' | 'error
 // only takes over in the ready state.
 const SCAN_W = 96
 const SCAN_H = 54
-
-// One static tile, made once and jumped around with background-position — a
-// moving noise field without redrawing anything per frame.
-let noiseTileUrl = ''
-function noiseTile(): string {
-  if (noiseTileUrl || typeof document === 'undefined') return noiseTileUrl
-  const c = document.createElement('canvas')
-  c.width = c.height = 96
-  const ctx = c.getContext('2d')
-  if (!ctx) return ''
-  const img = ctx.createImageData(96, 96)
-  for (let i = 0; i < img.data.length; i += 4) {
-    const v = 20 + Math.random() * 150
-    img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v + 10; img.data[i + 3] = 255
-  }
-  ctx.putImageData(img, 0, 0)
-  noiseTileUrl = c.toDataURL()
-  return noiseTileUrl
-}
 
 // Colour bars stand in until the thumbnail loads, and for good when a site
 // gives none.
@@ -511,27 +512,28 @@ export default function GrabberApp() {
 
   // Photo jobs (gallery-dl). Separate state from `downloads` (which is for
   // yt-dlp video jobs) because the data shape is different — a single photo
-  // job produces N files served as a grid, not one video file.
-  interface PhotoFile { index: number; name: string; size: number }
-  interface PhotoJob {
-    id: string
-    url: string
-    status: 'downloading' | 'done' | 'error'
-    files: PhotoFile[]
-    error?: string
-    // Prefetch state. iOS Safari requires navigator.share to be called
-    // inside the SAME synchronous tap handler that originated the user
-    // gesture — any await between tap and share() invalidates the
-    // activation token. We pre-fetch every photo into memory as soon as
-    // the job finishes, then `ready` flips true and Save can fire share
-    // without any async work.
-    prefetchPct?: number
-    ready?: boolean
-  }
+  // job produces N files — but rendered in the same Downloads list.
+  //
+  // iOS Safari requires navigator.share to be called inside the SAME
+  // synchronous tap handler as the gesture — any await between tap and
+  // share() invalidates the activation token. So every file is pulled into
+  // memory first (pumpPhotoJob), and `ready` flips true once Save can fire
+  // share without any async work.
+  type PhotoJob = PhotoCardJob & { startedAt: number }
   const [photoJobs, setPhotoJobs] = useState<PhotoJob[]>([])
-  // Cached File[] per job, keyed by job id. Populated by the background
-  // prefetch effect below.
-  const photoCache = useRef<Record<string, File[]>>({})
+  // Per job, per file index: where the phone is with that item.
+  const [photoItems, setPhotoItems] = useState<Record<string, Record<number, PhotoItem>>>({})
+  // Per job: file indexes the user unticked. Everything starts ticked.
+  const [photoUnticked, setPhotoUnticked] = useState<Record<string, number[]>>({})
+  // Pulled (and, for videos, re-encoded) files per job, by file index.
+  const photoCache = useRef<Record<string, (File | undefined)[]>>({})
+  // Object URLs for pulled photos, so tiles show the real picture without
+  // fetching it a second time over a slow link.
+  const photoUrls = useRef<Record<string, Record<number, string>>>({})
+  // The server's view of each job, read by pumpPhotoJob as files appear.
+  const photoServer = useRef<Record<string, { status: PhotoJob['status']; files: PhotoFile[] }>>({})
+  // Abort handles for a job's pulls and its current re-encode.
+  const photoAbort = useRef<Record<string, { ac: AbortController; worker?: { cancel: () => void } }>>({})
 
   // Server disk usage (shown in Settings). grabberBytes = the clearable part
   // (downloads + photos temp dirs); the rest is OS/swap and can't be touched.
@@ -707,20 +709,28 @@ export default function GrabberApp() {
     }
   }, [videos, settings.autoBest])
 
-  // SYNCHRONOUS save — see prefetch effect below for the cache. iOS will
-  // reject navigator.share with "request not allowed" if anything awaits
-  // between the user's tap and the share() call, so we never do.
+  // Ticked, finished files of a job, in post order.
+  const photoSelection = (job: PhotoJob): File[] => {
+    const cache = photoCache.current[job.id] || []
+    const items = photoItems[job.id] || {}
+    const off = new Set(photoUnticked[job.id] || [])
+    return job.files
+      .filter(f => items[f.index]?.state === 'ready' && !off.has(f.index))
+      .map(f => cache[f.index])
+      .filter((f): f is File => !!f)
+  }
+
+  // SYNCHRONOUS save — pumpPhotoJob has already pulled everything into
+  // memory. iOS rejects navigator.share with "request not allowed" if
+  // anything awaits between the user's tap and the share() call.
   const handlePhotoSaveAll = (job: PhotoJob) => {
-    const cached = photoCache.current[job.id]
-    if (!cached || !job.ready) {
-      setError('Files still preparing — wait for the green button.')
+    const files = photoSelection(job)
+    if (!job.ready || files.length === 0) {
+      setError('Files still preparing — wait for the Save button.')
       return
     }
-    if (typeof navigator !== 'undefined' && navigator.canShare?.({ files: cached })) {
-      // SYNCHRONOUS share inside the tap handler. No await between the user
-      // gesture and navigator.share() — iOS invalidates the activation
-      // token on any await, which is the error the user kept hitting.
-      navigator.share({ files: cached }).catch((err: any) => {
+    if (typeof navigator !== 'undefined' && navigator.canShare?.({ files })) {
+      navigator.share({ files }).catch((err: any) => {
         if (err?.name === 'AbortError') return
         setError(`Save failed: ${err?.message || err}`)
       })
@@ -729,17 +739,17 @@ export default function GrabberApp() {
     }
   }
 
-  // Plain browser downloads for every file in the job — the reliable path on
+  // Plain browser downloads for every ticked file — the reliable path on
   // desktop, where the share sheet either doesn't exist or opens a useless
   // OS flyout. Staggered clicks so Chrome's multi-download throttle shows
   // its "allow multiple downloads" prompt instead of silently dropping files.
   const handlePhotoDownloadAll = (job: PhotoJob) => {
-    const cached = photoCache.current[job.id]
-    if (!cached || !job.ready) {
-      setError('Files still preparing — wait for the green button.')
+    const files = photoSelection(job)
+    if (!job.ready || files.length === 0) {
+      setError('Files still preparing — wait for the Save button.')
       return
     }
-    cached.forEach((f, i) => {
+    files.forEach((f, i) => {
       setTimeout(() => {
         const url = URL.createObjectURL(f)
         const a = document.createElement('a')
@@ -751,45 +761,148 @@ export default function GrabberApp() {
     })
   }
 
-  // Background prefetch — fires whenever a photo job flips to `done`. Loads
-  // every file into the photoCache so handlePhotoSaveAll can fire share
-  // synchronously in the tap handler.
-  const prefetchingRef = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    for (const job of photoJobs) {
-      if (job.status !== 'done' || job.ready || prefetchingRef.current.has(job.id)) continue
-      prefetchingRef.current.add(job.id)
-      ;(async () => {
-        try {
-          const files: File[] = []
-          for (let i = 0; i < job.files.length; i++) {
-            const meta = job.files[i]
-            const r = await fetch(`/api/photos/${job.id}/file/${meta.index}`, { cache: 'no-store' })
-            if (!r.ok) throw new Error(`fetch ${meta.name} HTTP ${r.status}`)
-            const blob = await r.blob()
-            files.push(new File([blob], meta.name, { type: blob.type || 'image/jpeg' }))
-            setPhotoJobs(prev => prev.map(j => j.id === job.id
-              ? { ...j, prefetchPct: Math.round(((i + 1) / job.files.length) * 100) }
-              : j))
+  const togglePhotoTick = (jobId: string, index: number) => {
+    setPhotoUnticked(prev => {
+      const off = new Set(prev[jobId] || [])
+      if (off.has(index)) off.delete(index)
+      else off.add(index)
+      return { ...prev, [jobId]: [...off] }
+    })
+  }
+
+  // Which items the phone re-encodes before saving. Same rule as video
+  // downloads: only on iOS (everything else plays VP9/AV1 natively), for any
+  // codec Photos won't import, and for every X video — X's H.264 still trips
+  // Photos with its non-square SAR (see the poll handler's isTwitter note).
+  const photoWillConvert = (url: string) => (f: PhotoFile) =>
+    f.kind === 'video' && isIOS()
+    && (isTwitterUrl(url) || (!!f.codec && f.codec !== 'h264' && f.codec !== 'hevc'))
+
+  // Pull each file to the phone as soon as the server has it, one at a time,
+  // so tiles fill in during the download instead of all at the end. Then
+  // re-encode the videos Photos would refuse. Reads the server's state from
+  // photoServer (the poll keeps it current), never from React state, so the
+  // loop can run across many renders.
+  const pumpPhotoJob = async (id: string, url: string) => {
+    const ctl: { ac: AbortController; worker?: { cancel: () => void } } = { ac: new AbortController() }
+    photoAbort.current[id] = ctl
+    const cache: (File | undefined)[] = []
+    photoCache.current[id] = cache
+    photoUrls.current[id] = {}
+    const log = (msg: string) => setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] photos: ${msg}`])
+    const setItem = (i: number, v: PhotoItem) =>
+      setPhotoItems(prev => ({ ...prev, [id]: { ...(prev[id] || {}), [i]: v } }))
+    const aborted = () => ctl.ac.signal.aborted
+
+    for (let i = 0; !aborted(); ) {
+      const srv = photoServer.current[id]
+      if (!srv) return
+      const meta = srv.files[i]
+      if (!meta) {
+        if (srv.status === 'downloading') { await new Promise(r => setTimeout(r, 400)); continue }
+        break
+      }
+      setItem(i, { state: 'arriving', pct: 0 })
+      try {
+        const r = await fetch(`/api/photos/${id}/file/${meta.index}`, { cache: 'no-store', signal: ctl.ac.signal })
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const total = parseInt(r.headers.get('content-length') || '0', 10)
+        const type = r.headers.get('content-type') || 'application/octet-stream'
+        const chunks: BlobPart[] = []
+        if (r.body && total) {
+          const reader = r.body.getReader()
+          let got = 0
+          let lastUi = 0
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            chunks.push(value)
+            got += value.length
+            const now = performance.now()
+            if (now - lastUi > 250) { lastUi = now; setItem(i, { state: 'arriving', pct: (got / total) * 100 }) }
           }
-          photoCache.current[job.id] = files
-          setPhotoJobs(prev => prev.map(j => j.id === job.id ? { ...j, ready: true, prefetchPct: 100 } : j))
-        } catch (err: any) {
-          setPhotoJobs(prev => prev.map(j => j.id === job.id ? { ...j, error: err.message || 'Prefetch failed' } : j))
-        } finally {
-          prefetchingRef.current.delete(job.id)
+        } else {
+          chunks.push(await r.blob())
         }
-      })()
+        const file = new File(chunks, meta.name, { type })
+        cache[i] = file
+        if (meta.kind !== 'video') photoUrls.current[id][i] = URL.createObjectURL(file)
+        setItem(i, { state: 'raw', pct: 100 })
+      } catch (err: any) {
+        if (aborted()) return
+        log(`couldn't fetch ${meta.name}: ${err?.message || err}`)
+        setItem(i, { state: 'failed', pct: 0 })
+      }
+      i++
     }
-  }, [photoJobs])
+    if (aborted()) return
+
+    const files = photoServer.current[id]?.files || []
+    const willConvert = photoWillConvert(url)
+    const canConvert = webCodecsProbe.current ? await webCodecsProbe.current : false
+    for (const f of files) {
+      if (aborted()) return
+      const src = cache[f.index]
+      if (!src || !willConvert(f)) continue
+      if (!canConvert) {
+        log(`${f.name} is ${f.codec || 'video'}, which Photos may refuse — this browser can't re-encode it`)
+        continue
+      }
+      setItem(f.index, { state: 'converting', pct: 0 })
+      log(`re-encoding ${f.name} (${f.codec || 'video'}) on device`)
+      try {
+        const handle = runWorker(
+          src,
+          { padTo9x16: false, burnSubtitles: false, srt: '' },
+          (pct, stage) => setItem(f.index, { state: 'converting', pct, stage }),
+          (msg) => log(`[worker] ${msg}`),
+        )
+        ctl.worker = handle
+        const out = await handle.promise
+        ctl.worker = undefined
+        cache[f.index] = new File([out], f.name.replace(/\.[^.]+$/, '') + '.mp4', { type: 'video/mp4' })
+        setItem(f.index, { state: 'ready', pct: 100 })
+      } catch (err: any) {
+        ctl.worker = undefined
+        if (aborted()) return
+        log(`couldn't re-encode ${f.name}: ${err?.message || err}`)
+        setItem(f.index, { state: 'failed', pct: 0 })
+      }
+    }
+    if (aborted()) return
+
+    // Anything still 'raw' needed no work: it's final as it is.
+    setPhotoItems(prev => {
+      const items = { ...(prev[id] || {}) }
+      for (const k of Object.keys(items)) {
+        if (items[+k].state === 'raw') items[+k] = { state: 'ready', pct: 100 }
+      }
+      return { ...prev, [id]: items }
+    })
+    setPhotoJobs(prev => prev.map(j => j.id === id ? { ...j, ready: true } : j))
+    haptic([15, 40, 15])
+    delete photoAbort.current[id]
+  }
 
   const removePhotoJob = (id: string) => {
+    const ctl = photoAbort.current[id]
+    if (ctl) {
+      try { ctl.ac.abort() } catch {}
+      try { ctl.worker?.cancel() } catch {}
+      delete photoAbort.current[id]
+    }
+    for (const u of Object.values(photoUrls.current[id] || {})) URL.revokeObjectURL(u)
+    delete photoUrls.current[id]
+    delete photoCache.current[id]
+    delete photoServer.current[id]
     fetch(`/api/photos/${id}`, { method: 'DELETE', cache: 'no-store' }).catch(() => {})
     setPhotoJobs(prev => prev.filter(j => j.id !== id))
+    setPhotoItems(prev => { const n = { ...prev }; delete n[id]; return n })
+    setPhotoUnticked(prev => { const n = { ...prev }; delete n[id]; return n })
   }
 
   // Start a gallery-dl job on the droplet. Skips metadata + format picking
-  // entirely — just submits the URL and polls the job until files arrive.
+  // entirely — submits the URL, polls the job, and pulls files as they land.
   const startPhotoJob = useCallback(async (rawUrl: string) => {
     const u = rawUrl.trim()
     if (!u) return
@@ -804,36 +917,50 @@ export default function GrabberApp() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'failed')
-      const newJob: PhotoJob = { id: data.id, url: u, status: 'downloading', files: [] }
+      const newJob: PhotoJob = { id: data.id, url: u, status: 'downloading', files: [], startedAt: Date.now() }
+      photoServer.current[data.id] = { status: 'downloading', files: [] }
       setPhotoJobs(prev => [newJob, ...prev])
 
-      // Poll every 1s while downloading.
+      // Poll every 1s until the server is done. 'done' arrives only after
+      // every file has been probed, so each video's codec is known by then.
       const poll = async () => {
         try {
           const r = await fetch(`/api/photos/${data.id}`, { cache: 'no-store' })
           if (!r.ok) return
-          const state = await r.json() as { status: PhotoJob['status']; files: PhotoFile[]; error?: string }
+          const state = await r.json() as {
+            status: PhotoJob['status']; files: PhotoFile[]; error?: string
+            author?: string; site?: string; expected?: number
+          }
+          if (!photoServer.current[data.id]) return 'gone'
+          photoServer.current[data.id] = { status: state.status, files: state.files }
           setPhotoJobs(prev => prev.map(j => j.id === data.id ? {
             ...j, status: state.status, files: state.files, error: state.error,
+            author: state.author, site: state.site, expected: state.expected,
           } : j))
           return state.status
         } catch {}
       }
       const interval = setInterval(async () => {
         const st = await poll()
-        if (st === 'done' || st === 'error') clearInterval(interval)
+        if (st === 'done' || st === 'error' || st === 'gone') clearInterval(interval)
       }, 1000)
       await poll()
+      pumpPhotoJob(data.id, u)
     } catch (err: any) {
       log(`photos: error — ${err.message}`)
       setError(err.message || 'Failed to start photo job')
     }
+    // pumpPhotoJob only touches refs and state setters, so the first render's
+    // copy is as good as any later one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const fetchInfo = useCallback(async (videoUrl: string) => {
     if (!videoUrl.trim()) return
-    // Photos mode: route the URL through gallery-dl instead of yt-dlp.
-    if (settings.photoMode) {
+    // Instagram post links (/p/) are photos or carousels far more often than
+    // not, and gallery-dl takes every item, videos included. Reels stay on
+    // yt-dlp. Direct image links go the same way.
+    if (isInstagramPostUrl(videoUrl.trim()) || isImageLink(videoUrl.trim())) {
       startPhotoJob(videoUrl)
       return
     }
@@ -881,16 +1008,24 @@ export default function GrabberApp() {
       const msg = err?.name === 'AbortError'
         ? 'Timed out after 45s — server probably stuck on this URL'
         : err.message || 'Failed to fetch video info'
+      // yt-dlp saying there's simply no video here (a photo tweet, an image
+      // post, an album on a site it doesn't know) hands the link to
+      // gallery-dl. Only those exact wordings: a region block or a private
+      // post should still read as that.
+      if (err?.name !== 'AbortError' && NO_VIDEO_HERE.test(msg)) {
+        log(`fetchInfo: no video in this post — trying gallery-dl`)
+        startPhotoJob(trimmedUrl)
+        return
+      }
       log(`fetchInfo: error — ${msg}`)
       setError(msg)
     } finally {
       clearTimeout(timeoutId)
       setLoading(false)
     }
-    // Deps: apiBase/apiHeaders close over desktopTunnelUrl + desktopKey,
-    // and the early-return for Photos mode closes over settings.photoMode
-    // + startPhotoJob — all need to be in deps so the closure stays fresh.
-  }, [desktopTunnelUrl, settings.desktopKey, settings.photoMode, startPhotoJob])
+    // Deps: apiBase/apiHeaders close over desktopTunnelUrl + desktopKey;
+    // startPhotoJob is stable (empty deps).
+  }, [desktopTunnelUrl, settings.desktopKey, startPhotoJob])
 
   const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string, opts: { noDirect?: boolean } = {}) => {
     haptic(10) // light tap on download start (Android/desktop; no-op on iOS)
@@ -1021,6 +1156,7 @@ export default function GrabberApp() {
         url: video.url,
         formatLabel,
         xferShare,
+        startedAt: Date.now(),
       }
 
       setDownloads(prev => [job, ...prev])
@@ -1164,6 +1300,7 @@ export default function GrabberApp() {
       url: video.url,
       formatLabel,
       direct: true,
+      startedAt: Date.now(),
     }
     setDownloads(prev => [job, ...prev])
     log(`direct: ${formatLabel} from ${new URL(directUrl).host}`)
@@ -1610,6 +1747,19 @@ export default function GrabberApp() {
     } : d))
   }
 
+  // Video and photo jobs share the Downloads list, newest first.
+  const feed: ({ kind: 'video'; t: number; dl: DownloadJob } | { kind: 'photo'; t: number; job: PhotoJob })[] = [
+    ...downloads.map(dl => ({ kind: 'video' as const, t: dl.startedAt || 0, dl })),
+    ...photoJobs.map(job => ({ kind: 'photo' as const, t: job.startedAt, job })),
+  ].sort((a, b) => b.t - a.t)
+
+  // Only terminal jobs: converting/subtitling videos and photo jobs still
+  // pulling or re-encoding are active work, not "completed".
+  const clearCompleted = () => {
+    setDownloads(prev => prev.filter(d => d.status !== 'done' && d.status !== 'error'))
+    for (const j of photoJobs) if (j.ready || j.status === 'error') removePhotoJob(j.id)
+  }
+
   return (
     <div className="min-h-screen flex flex-col items-center sm:px-4 sm:py-6">
       {/* App shell — the whole app lives in a molded slate box centered on
@@ -1709,19 +1859,6 @@ export default function GrabberApp() {
             </div>
             <label className="relative inline-flex cursor-pointer">
               <input type="checkbox" checked={settings.burnSubtitles} onChange={(e) => setSettings(s => ({ ...s, burnSubtitles: e.target.checked }))} className="sr-only peer" />
-              <div className="cb-box" />
-            </label>
-          </div>
-
-          {/* Photos mode — route URLs through gallery-dl instead of yt-dlp.
-              For image posts, carousels, Pixiv illustrations, etc. */}
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-text-primary">Photos mode</p>
-              <p className="text-xs text-text-muted">Use gallery-dl for image posts & carousels</p>
-            </div>
-            <label className="relative inline-flex cursor-pointer">
-              <input type="checkbox" checked={settings.photoMode} onChange={(e) => setSettings(s => ({ ...s, photoMode: e.target.checked }))} className="sr-only peer" />
               <div className="cb-box" />
             </label>
           </div>
@@ -1880,7 +2017,7 @@ export default function GrabberApp() {
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && fetchInfo(url)}
-              placeholder={settings.photoMode ? 'Paste photo or post URL...' : 'Paste video URL...'}
+              placeholder='Paste a video or post URL...'
               className="flex-1 h-10 inset-field px-4 text-sm outline-none transition-colors"
             />
             {/* Paste — ghost icon button */}
@@ -1924,7 +2061,7 @@ export default function GrabberApp() {
               className="flex-1 h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
             >
               {loading ? <Loader size={16} className="animate-spin" /> : <Download size={16} />}
-              {loading ? 'Fetching…' : settings.photoMode ? 'Fetch Photos' : 'Fetch Video'}
+              {loading ? 'Fetching…' : 'Fetch'}
             </button>
             {/* Reload — ghost icon button */}
             <button
@@ -2087,127 +2224,42 @@ export default function GrabberApp() {
           </div>
         )}
 
-        {/* Photo jobs (gallery-dl) — separate section with grid layout. */}
-        {photoJobs.length > 0 && (
-          <div className="space-y-3">
-            <h3 className="pixel-head text-xs font-bold uppercase tracking-[0.24em]">Photos</h3>
-            {photoJobs.map((job) => (
-              <div key={job.id} className="panel p-3 animate-fade-in space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-text-primary truncate">{job.url}</p>
-                    <p className="text-xs mt-0.5">
-                      {job.status === 'downloading' && <span className="text-accent">Downloading… {job.files.length} so far</span>}
-                      {job.status === 'done' && <span className="text-success">{job.files.length} files ready</span>}
-                      {job.status === 'error' && <span className="text-danger">Failed — {job.error}</span>}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => removePhotoJob(job.id)}
-                    className="h-8 w-8 grid place-items-center rounded-md text-text-muted hover:text-danger hover:bg-danger/10 transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50"
-                    title="Remove"
-                    aria-label="Remove"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-
-                {/* Thumbnail grid — 3 cols, each tile is square. */}
-                {job.files.length > 0 && (
-                  <div className="grid grid-cols-3 gap-2">
-                    {job.files.map((f) => (
-                      <div key={f.index} className="relative aspect-square bg-surface-2 rounded-sm overflow-hidden border border-subtle">
-                        <img
-                          src={`/api/photos/${job.id}/file/${f.index}`}
-                          alt={f.name}
-                          loading="lazy"
-                          className="w-full h-full object-cover"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Three button states:
-                    1. Job still downloading → disabled "Wait — fetching…"
-                    2. Job done but prefetching files into memory → "Preparing…"
-                       (no tap possible — share would fail iOS gesture check)
-                    3. Ready → tap-to-save (success) */}
-                {job.status === 'downloading' && (
-                  <button disabled className="w-full h-10 px-4 raised text-sm font-medium">
-                    Wait — still fetching…
-                  </button>
-                )}
-                {job.status === 'done' && !job.ready && (
-                  <div className="relative w-full h-10 tbar-track overflow-hidden">
-                    {(job.prefetchPct || 0) > 0 ? (
-                      <div className="absolute inset-y-0 left-0 tbar-fill text-[#5a9ee8] transition-all duration-200" style={{ width: `${job.prefetchPct}%` }} />
-                    ) : (
-                      <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
-                    )}
-                    <div className="relative flex items-center justify-center h-full gap-1.5">
-                      <Loader size={14} className="animate-spin text-white" />
-                      <span className="text-xs font-medium text-white">Preparing…{(job.prefetchPct || 0) > 0 ? ` ${job.prefetchPct}%` : ''}</span>
-                    </div>
-                  </div>
-                )}
-                {job.status === 'done' && job.ready && (
-                  // iOS: share sheet is the way into the Photos app, so it
-                  // stays primary with a download icon beside it. Everywhere
-                  // else: plain downloads are primary (desktop share flyouts
-                  // are useless), with share demoted to an icon when the
-                  // browser genuinely supports file sharing.
-                  <div className="flex gap-2">
-                    {isIOS() && canShare ? (
-                      <>
-                        <button
-                          onClick={() => handlePhotoSaveAll(job)}
-                          className="flex-1 h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-                        >
-                          Save all {job.files.length} to Photos
-                        </button>
-                        <button
-                          onClick={() => handlePhotoDownloadAll(job)}
-                          className="h-10 w-10 grid place-items-center raised transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-                          title="Download files"
-                          aria-label="Download files"
-                        >
-                          <Download size={16} />
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={() => handlePhotoDownloadAll(job)}
-                        className="flex-1 h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-                      >
-                        <Download size={16} />
-                        Download all {job.files.length}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Downloads */}
-        {downloads.length > 0 && (
+        {/* Downloads — video jobs and photo/carousel jobs in one list, newest first. */}
+        {feed.length > 0 && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="pixel-head text-xs font-bold uppercase tracking-[0.24em]">Downloads</h3>
               {/* Only terminal jobs are clearable — converting/subtitling are
                   still active work, not "completed". */}
-              {downloads.some(d => d.status === 'done' || d.status === 'error') && (
+              {(downloads.some(d => d.status === 'done' || d.status === 'error') || photoJobs.some(j => j.ready || j.status === 'error')) && (
                 <button
-                  onClick={() => setDownloads(prev => prev.filter(d => d.status !== 'done' && d.status !== 'error'))}
+                  onClick={clearCompleted}
                   className="pixel-head text-[10px] font-bold uppercase tracking-[0.14em] hover:text-[#ffd54a] hover:underline transition-colors"
                 >
                   Clear completed
                 </button>
               )}
             </div>
-            {downloads.map((dl) => {
+            {feed.map((entry) => {
+              if (entry.kind === 'photo') {
+                const job = entry.job
+                return (
+                  <PhotoCard
+                    key={job.id}
+                    job={job}
+                    items={photoItems[job.id] || {}}
+                    unticked={photoUnticked[job.id] || []}
+                    willConvert={photoWillConvert(job.url)}
+                    srcFor={(i) => photoUrls.current[job.id]?.[i]}
+                    canSavePhotos={isIOS() && canShare}
+                    onToggle={(i) => togglePhotoTick(job.id, i)}
+                    onSave={() => handlePhotoSaveAll(job)}
+                    onDownload={() => handlePhotoDownloadAll(job)}
+                    onRemove={() => removePhotoJob(job.id)}
+                  />
+                )
+              }
+              const dl = entry.dl
               const active = dl.status === 'downloading' || dl.status === 'converting' || dl.status === 'subtitling'
               const busy = active || saveProgress[dl.id] !== undefined || !!instantProgress[dl.id]
               const device = instantProgress[dl.id]
@@ -2393,16 +2445,14 @@ export default function GrabberApp() {
         )}
 
         {/* Empty state */}
-        {videos.length === 0 && !loading && downloads.length === 0 && (
+        {videos.length === 0 && !loading && feed.length === 0 && (
           <div className="text-center py-12">
             <Download size={40} strokeWidth={1.5} className="mx-auto mb-3 text-[#f4f5f7]" style={{ filter: 'drop-shadow(1.5px 1.5px 0 #22262e)' }} />
             <p className="pixel-head text-sm font-bold uppercase tracking-[0.14em]">
-              {settings.photoMode ? 'Paste a photo or post URL to get started' : 'Paste a video URL to get started'}
+              Paste a link to get started
             </p>
             <p className="text-xs mt-2 text-[#d3d7de]">
-              {settings.photoMode
-                ? 'Photos mode is on — grabs images & carousels'
-                : 'Works with YouTube, TikTok, Instagram, and 1800+ sites'}
+              Videos, photos and carousels from YouTube, TikTok, Instagram, X and 1800+ sites
             </p>
             {settings.autoDetect && (
               <p className="text-xs mt-3 text-[#aebfd8]">

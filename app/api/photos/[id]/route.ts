@@ -10,10 +10,18 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     id: job.id,
     status: job.status,
     error: job.error,
+    author: job.author,
+    site: job.site,
+    expected: job.expected,
     files: job.files.map((f, i) => ({
       index: i,
       name: f.name,
       size: f.size,
+      kind: f.kind,
+      codec: f.codec,
+      duration: f.duration,
+      thumb: !!f.thumbPath,
+      poster: !!f.posterPath,
     })),
   }, { headers: { 'Cache-Control': 'no-store' } })
 }
