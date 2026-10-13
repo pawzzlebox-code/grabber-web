@@ -240,6 +240,137 @@ input:disabled + .cb-box { opacity: 0.6; }
   animation: indeterminate 1.4s ease-in-out infinite;
 }
 
+/* ── Progressive-scan banner (ScanBanner in GrabberApp.tsx) ────────────────
+   In the components layer, unlike the rules above, so utilities on the same
+   element (h-44, aspect-auto, border-0 on the fetch skeleton) can override it.
+   Every motion here is stepped, never eased — it should read as a scan
+   arriving, not as a modern slide. */
+@layer components {
+  .scan-banner {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: var(--track);
+    border: 2px solid;
+    border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+  }
+  .scan-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    image-rendering: pixelated;
+  }
+  /* Same specificity as preflight's [hidden] rule but a later layer, so the
+     display above would otherwise un-hide the canvases ScanBanner hides. */
+  .scan-layer[hidden] { display: none; }
+  /* CRT scanlines over everything except the chip. */
+  .scan-banner::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.18) 0 1px, transparent 1px 3px);
+  }
+
+  /* Static: one noise tile jumped between offsets, 2px per noise pixel. */
+  .scan-noise {
+    background-size: 192px 192px;
+    animation: scan-noise 0.4s steps(1) infinite;
+  }
+  .scan-banner[data-mode='download'] .scan-noise { opacity: 0.6; }
+  .scan-roll {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 12%;
+    background: rgba(255, 255, 255, 0.28);
+    animation: scan-roll 1.2s steps(12) infinite;
+  }
+
+  /* Converting: grey, dithered picture under a colour pass. */
+  .scan-gray { filter: grayscale(1) contrast(1.25) brightness(0.9); }
+  .scan-dither {
+    background-image: conic-gradient(rgba(8, 9, 11, 0.35) 25%, transparent 0 50%, rgba(8, 9, 11, 0.35) 0 75%, transparent 0);
+    background-size: 2px 2px;
+  }
+
+  /* The bright edge of whatever is being drawn. */
+  .scan-hline, .scan-vline {
+    position: absolute;
+    background: #ebf0ff;
+    box-shadow: 0 0 6px rgba(235, 240, 255, 0.8);
+  }
+  .scan-hline { left: 0; right: 0; height: 2px; }
+  .scan-vline { top: 0; bottom: 0; width: 2px; }
+  .scan-hline.scan-accent { background: #5a9ee8; box-shadow: 0 0 6px rgba(90, 158, 232, 0.8); }
+
+  /* Preparing: the picture tints blue as it's wiped across to the phone. */
+  .scan-tint { background: rgba(90, 158, 232, 0.42); }
+  .scan-tint.scan-bad { background: rgba(224, 82, 94, 0.38); }
+
+  /* Ready: a CRT flash, then the full-res thumbnail locks in. */
+  .scan-flash { background: #ffffff; opacity: 0; animation: scan-flash 0.42s steps(1) 1; }
+  .scan-hires {
+    object-fit: cover;
+    image-rendering: auto;
+    opacity: 0;
+    animation: scan-lock 0.3s steps(3) 0.4s forwards;
+  }
+
+  .scan-chip {
+    position: absolute;
+    left: 6px;
+    top: 6px;
+    z-index: 1;
+    padding: 3px 6px;
+    background: var(--ink);
+    color: var(--head-white);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .scan-chip.scan-ok { background: var(--success); }
+  .scan-chip.scan-bad { background: var(--danger); }
+
+  /* Indeterminate passes, used before the server reports a percentage. */
+  .scan-sweep-y { animation: scan-sweep-y 1.6s steps(27) infinite; }
+  .scan-line-y { animation: scan-line-y 1.6s steps(27) infinite; }
+  .scan-sweep-x { animation: scan-sweep-x 1.4s steps(24) infinite; }
+  .scan-line-x { animation: scan-line-x 1.4s steps(24) infinite; }
+
+  /* Failed: the picture tears and jumps sideways. */
+  .scan-glitch { animation: scan-glitch 1.1s steps(1) infinite; }
+}
+
+@keyframes scan-noise {
+  0%   { background-position: 0 0; }
+  25%  { background-position: -62px -114px; }
+  50%  { background-position: -134px -26px; }
+  75%  { background-position: -22px -166px; }
+}
+@keyframes scan-roll { from { top: -12%; } to { top: 100%; } }
+@keyframes scan-flash { 0% { opacity: 1; } 33% { opacity: 0.66; } 66% { opacity: 0.33; } 100% { opacity: 0; } }
+@keyframes scan-lock { to { opacity: 1; } }
+@keyframes scan-sweep-y { from { clip-path: inset(0 0 100% 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes scan-line-y { from { top: 0; } to { top: 100%; } }
+@keyframes scan-sweep-x { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes scan-line-x { from { left: 0; } to { left: 100%; } }
+@keyframes scan-glitch {
+  0%   { transform: none; clip-path: none; }
+  18%  { transform: translateX(-6px); clip-path: inset(22% 0 52% 0); }
+  21%  { transform: translateX(4px); clip-path: none; }
+  24%  { transform: none; }
+  58%  { transform: translateX(7px); clip-path: inset(61% 0 18% 0); }
+  61%  { transform: none; clip-path: none; }
+  84%  { transform: translateX(-3px); }
+  86%  { transform: none; }
+}
+
 /* Settings bottom sheet — slides up from the bottom edge; backdrop fades in. */
 @keyframes sheet-up {
   from { transform: translateY(100%); }

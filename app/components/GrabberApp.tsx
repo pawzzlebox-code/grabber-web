@@ -136,27 +136,136 @@ function formatUploadDate(d?: string): string {
   return `${MONTHS[m - 1]} ${parseInt(d.slice(6, 8), 10)}, ${d.slice(0, 4)}`
 }
 
-// Circular progress ring overlaid on a download's thumbnail. Determinate when
-// percent > 0, otherwise a gentle indeterminate spin.
-function ProgressRing({ percent, size = 26, stroke = 3 }: { percent: number; size?: number; stroke?: number }) {
-  const r = (size - stroke) / 2
-  const circ = 2 * Math.PI * r
-  const pct = Math.min(100, Math.max(0, percent))
-  const determinate = pct > 0
-  const offset = circ - (pct / 100) * circ
+// ── Progressive-scan banner ────────────────────────────────────────────────
+// A download card's thumbnail doubles as its progress bar: the picture arrives
+// row by row over static while downloading, gets a colour pass while
+// converting, is wiped toward the phone while preparing, and locks in with a
+// CRT flash once ready. Styles live in globals.css under .scan-*.
+
+type ScanMode = 'tuning' | 'download' | 'convert' | 'prepare' | 'ready' | 'error'
+
+// The low-res canvases are what give the pixel look; the full-res thumbnail
+// only takes over in the ready state.
+const SCAN_W = 96
+const SCAN_H = 54
+
+// One static tile, made once and jumped around with background-position — a
+// moving noise field without redrawing anything per frame.
+let noiseTileUrl = ''
+function noiseTile(): string {
+  if (noiseTileUrl || typeof document === 'undefined') return noiseTileUrl
+  const c = document.createElement('canvas')
+  c.width = c.height = 96
+  const ctx = c.getContext('2d')
+  if (!ctx) return ''
+  const img = ctx.createImageData(96, 96)
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 20 + Math.random() * 150
+    img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v + 10; img.data[i + 3] = 255
+  }
+  ctx.putImageData(img, 0, 0)
+  noiseTileUrl = c.toDataURL()
+  return noiseTileUrl
+}
+
+// Colour bars stand in until the thumbnail loads, and for good when a site
+// gives none.
+function drawTestBars(ctx: CanvasRenderingContext2D) {
+  const top = ['#c0c0c0', '#c0c000', '#00c0c0', '#00c000', '#c000c0', '#c00000', '#0000c0']
+  const low = ['#0000c0', '#131313', '#c000c0', '#131313', '#00c0c0', '#131313', '#c0c0c0']
+  const bw = SCAN_W / top.length
+  const split = Math.round(SCAN_H * 0.72)
+  top.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(Math.floor(i * bw), 0, Math.ceil(bw), split) })
+  low.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(Math.floor(i * bw), split, Math.ceil(bw), SCAN_H - split) })
+}
+
+function ScanBanner({ thumbnail, mode, pct, chip, className = '' }: {
+  thumbnail?: string
+  mode: ScanMode
+  /** 0–100; 0 or less plays the indeterminate version of the mode. */
+  pct: number
+  chip: string
+  className?: string
+}) {
+  const colorRef = useRef<HTMLCanvasElement>(null)
+  const grayRef = useRef<HTMLCanvasElement>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [noise, setNoise] = useState('')
+
+  useEffect(() => { setNoise(noiseTile()) }, [])
+
+  // Drawing a cross-origin image taints the canvas, which only blocks reading
+  // pixels back — nothing here does, so no CORS is needed from thumbnail hosts.
+  useEffect(() => {
+    const canvases = [colorRef.current, grayRef.current].filter((c): c is HTMLCanvasElement => !!c)
+    const paint = (img?: HTMLImageElement) => {
+      for (const cv of canvases) {
+        const ctx = cv.getContext('2d')
+        if (!ctx) continue
+        if (!img) { drawTestBars(ctx); continue }
+        // Centre-crop to 16:9 so tall or square thumbnails still fill the banner.
+        const sw = img.naturalWidth, sh = img.naturalHeight
+        const cw = Math.min(sw, (sh * 16) / 9), ch = (cw * 9) / 16
+        ctx.drawImage(img, (sw - cw) / 2, (sh - ch) / 2, cw, ch, 0, 0, SCAN_W, SCAN_H)
+      }
+    }
+    paint()
+    setLoaded(false)
+    if (!thumbnail) return
+    let alive = true
+    const img = new Image()
+    img.onload = () => { if (alive) { paint(img); setLoaded(true) } }
+    img.src = thumbnail
+    return () => { alive = false }
+  }, [thumbnail])
+
+  const det = pct > 0
+  // Quantise to whole canvas rows/columns so the reveal steps like a scan
+  // instead of sliding.
+  const clamped = Math.min(100, pct)
+  const rowP = det ? (Math.floor((clamped / 100) * SCAN_H) / SCAN_H) * 100 : 0
+  const colP = det ? (Math.floor((clamped / 100) * SCAN_W) / SCAN_W) * 100 : 0
+
+  const showColor = mode === 'download' ? det : mode !== 'tuning'
+  const colorClip = mode === 'download' || (mode === 'convert' && det)
+    ? { clipPath: `inset(0 0 ${100 - rowP}% 0)` }
+    : undefined
+  const colorAnim = mode === 'convert' && !det ? ' scan-sweep-y' : mode === 'error' ? ' scan-glitch' : ''
+
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className={`-rotate-90 ${determinate ? '' : 'animate-spin'}`}>
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth={stroke} />
-      <circle
-        cx={size / 2} cy={size / 2} r={r} fill="none"
-        className="text-[#7fc4f2] transition-[stroke-dashoffset] duration-300"
-        stroke="currentColor" strokeWidth={stroke} strokeLinecap="round"
-        strokeDasharray={circ}
-        strokeDashoffset={determinate ? offset : circ * 0.75}
-      />
-    </svg>
+    <div className={`scan-banner ${className}`} data-mode={mode} aria-hidden>
+      <div className="scan-layer scan-noise" style={noise ? { backgroundImage: `url(${noise})` } : undefined} />
+      <canvas ref={grayRef} width={SCAN_W} height={SCAN_H} className="scan-layer scan-gray" hidden={mode !== 'convert'} />
+      {mode === 'convert' && <div className="scan-layer scan-dither" />}
+      <canvas ref={colorRef} width={SCAN_W} height={SCAN_H} className={`scan-layer${colorAnim}`} style={colorClip} hidden={!showColor} />
+      {(mode === 'tuning' || (mode === 'download' && !det)) && <div className="scan-roll" />}
+      {mode === 'download' && det && rowP < 100 && <div className="scan-hline" style={{ top: `${rowP}%` }} />}
+      {mode === 'convert' && (det
+        ? <div className="scan-hline scan-accent" style={{ top: `${rowP}%` }} />
+        : <div className="scan-hline scan-accent scan-line-y" />)}
+      {mode === 'prepare' && (det ? (
+        <>
+          <div className="scan-layer scan-tint" style={{ clipPath: `inset(0 ${100 - colP}% 0 0)` }} />
+          <div className="scan-vline" style={{ left: `${colP}%` }} />
+        </>
+      ) : (
+        <>
+          <div className="scan-layer scan-tint scan-sweep-x" />
+          <div className="scan-vline scan-line-x" />
+        </>
+      ))}
+      {mode === 'error' && <div className="scan-layer scan-tint scan-bad" />}
+      {mode === 'ready' && loaded && thumbnail && <img src={thumbnail} alt="" className="scan-layer scan-hires" />}
+      {mode === 'ready' && <div className="scan-layer scan-flash" />}
+      <span className={`scan-chip${mode === 'ready' ? ' scan-ok' : mode === 'error' ? ' scan-bad' : ''}`}>{chip}</span>
+    </div>
   )
 }
+
+// "042%" — fixed width, so the chip doesn't twitch as the number climbs.
+const scanPct = (n: number) => `${String(Math.round(Math.min(100, Math.max(0, n)))).padStart(3, '0')}%`
+// "Encode 042%", or "Encode…" before there's a number to show.
+const scanChip = (label: string, n: number) => (n > 0 ? `${label} ${scanPct(n)}` : `${label}…`)
 
 // A link straight to a media file, rather than a page a site extractor knows
 // how to read. These need the referring page's headers to fetch server-side,
@@ -1612,7 +1721,7 @@ export default function GrabberApp() {
             reads as progress instead of a frozen page. */}
         {loading && videos.length === 0 && (
           <div className="panel overflow-hidden animate-fade-in" aria-hidden>
-            <div className="w-full h-44 bg-surface-2 animate-pulse" />
+            <ScanBanner mode="tuning" pct={0} chip="Tuning…" className="h-44 aspect-auto border-0" />
             <div className="p-4 space-y-3">
               <div className="h-3.5 w-2/5 bg-surface-2 rounded animate-pulse" />
               <div className="h-4 w-4/5 bg-surface-2 rounded animate-pulse" />
@@ -1857,22 +1966,23 @@ export default function GrabberApp() {
             {downloads.map((dl) => {
               const active = dl.status === 'downloading' || dl.status === 'converting' || dl.status === 'subtitling'
               const busy = active || saveProgress[dl.id] !== undefined || !!instantProgress[dl.id]
+              const device = instantProgress[dl.id]
+              const prep = saveProgress[dl.id]
+              // What the banner draws — same priority order as the action area.
+              const scan: { mode: ScanMode; pct: number; chip: string } =
+                dl.status === 'error' ? { mode: 'error', pct: 0, chip: 'Signal lost' }
+                : dl.status === 'downloading' ? { mode: 'download', pct: dl.percent, chip: dl.percent > 0 ? scanPct(dl.percent) : 'Starting…' }
+                : active ? { mode: 'convert', pct: dl.percent, chip: scanChip(dl.status === 'subtitling' ? 'Subs' : 'Encode', dl.percent) }
+                : device ? { mode: 'convert', pct: device.pct, chip: scanChip('Device', device.pct) }
+                : prep !== undefined ? { mode: 'prepare', pct: prep, chip: scanChip('→ Phone', prep) }
+                : { mode: 'ready', pct: 100, chip: 'Ready' }
               return (
               <div
                 key={dl.id}
                 className="panel p-3 animate-fade-in"
               >
-                <div className="flex gap-3 items-start">
-                  {dl.thumbnail && (
-                    <div className="relative w-16 h-9 flex-shrink-0">
-                      <img src={dl.thumbnail} alt="" className="w-16 h-9 object-cover rounded-sm" />
-                      {active && (
-                        <div className="absolute inset-0 grid place-items-center rounded-sm bg-black/55">
-                          <ProgressRing percent={dl.percent} size={22} />
-                        </div>
-                      )}
-                    </div>
-                  )}
+                <ScanBanner thumbnail={dl.thumbnail} mode={scan.mode} pct={scan.pct} chip={scan.chip} />
+                <div className="mt-3 flex gap-3 items-start">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-start justify-between gap-2">
                       {/* Receipt, not headline — match the result card's demoted
@@ -1881,12 +1991,6 @@ export default function GrabberApp() {
                       {/* mr-1 lines this 32px control's center up with the 40px
                           icon button at the card's right edge below. */}
                       <div className="flex items-start gap-0.5 flex-shrink-0 mr-1">
-                        {/* Spinner only when there's no thumbnail — otherwise the thumbnail ring shows progress. */}
-                        {active && !dl.thumbnail && (
-                          <span className="h-8 w-8 grid place-items-center">
-                            <Loader size={16} className="animate-spin text-accent" />
-                          </span>
-                        )}
                         {/* Done state is shown inline in the status line below —
                             no corner icon, so the card has one clear signal. */}
                         {dl.status === 'error' && (
@@ -1934,24 +2038,29 @@ export default function GrabberApp() {
                       const label = dl.status === 'converting' ? 'Converting'
                         : dl.status === 'subtitling' ? 'Subtitles' : 'Downloading'
                       const determinate = dl.percent > 0
+                      // No bar here — the banner above is the progress bar.
                       return (
-                        <>
-                          <div className="mt-2 relative w-full h-1.5 tbar-track overflow-hidden">
-                            {determinate ? (
-                              <div className="h-full tbar-fill text-[#5a9ee8] transition-all duration-300" style={{ width: `${dl.percent}%` }} />
-                            ) : (
-                              <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
-                            )}
-                          </div>
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
-                            <span className="text-text-secondary">{determinate ? `${label}… ${dl.percent.toFixed(0)}%` : `${label}…`}</span>
-                            {dl.totalSize && <span>{dl.totalSize}</span>}
-                            {dl.speed && <span>{dl.speed}</span>}
-                            {dl.eta && <span className="whitespace-nowrap">ETA {dl.eta}</span>}
-                          </div>
-                        </>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
+                          <span className="text-text-secondary">{determinate ? `${label}… ${dl.percent.toFixed(0)}%` : `${label}…`}</span>
+                          {dl.totalSize && <span>{dl.totalSize}</span>}
+                          {dl.speed && <span>{dl.speed}</span>}
+                          {dl.eta && <span className="whitespace-nowrap">ETA {dl.eta}</span>}
+                        </div>
                       )
                     })()}
+
+                    {/* On-device processing, then the phone pulling the file. The
+                        banner draws both; these lines carry the numbers. */}
+                    {device ? (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
+                        <span className="text-text-secondary">{device.stage}{device.pct > 0 ? ` ${device.pct}%` : ''}</span>
+                      </div>
+                    ) : prep !== undefined && (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
+                        <span className="text-text-secondary">{prep >= 0 ? `Preparing… ${prep}%` : 'Preparing…'}</span>
+                        {saveSpeed[dl.id] && <span>{saveSpeed[dl.id]}</span>}
+                      </div>
+                    )}
 
                     {dl.status === 'error' && dl.error && (
                       <p className="mt-1 text-xs text-danger">{dl.error}</p>
@@ -1961,40 +2070,11 @@ export default function GrabberApp() {
 
                 {/* Action area sits OUTSIDE the thumbnail row — full card width,
                     12px below the status line. */}
-                {dl.status === 'done' && (
+                {/* Buttons only once nothing is in flight — while processing or
+                    preparing, the banner and status line show the progress. */}
+                {dl.status === 'done' && !device && prep === undefined && (
                   <div className="mt-3">
-                        {instantProgress[dl.id] ? (
-                          // On-device processing — accent determinate bar.
-                          <div className="relative w-full h-9 tbar-track overflow-hidden">
-                            {instantProgress[dl.id].pct > 0 ? (
-                              <div className="absolute inset-y-0 left-0 tbar-fill text-[#5a9ee8] transition-all duration-200" style={{ width: `${instantProgress[dl.id].pct}%` }} />
-                            ) : (
-                              <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
-                            )}
-                            <div className="relative flex items-center justify-center h-full gap-1.5">
-                              <Loader size={14} className="animate-spin text-white" />
-                              <span className="text-xs font-medium text-white">
-                                {instantProgress[dl.id].stage}{instantProgress[dl.id].pct > 0 ? ` ${instantProgress[dl.id].pct}%` : ''}
-                              </span>
-                            </div>
-                          </div>
-                        ) : saveProgress[dl.id] !== undefined ? (
-                          // Preparing the file for share — accent; indeterminate when -1.
-                          <div className="relative w-full h-9 tbar-track overflow-hidden">
-                            {saveProgress[dl.id] >= 0 ? (
-                              <div className="absolute inset-y-0 left-0 tbar-fill text-[#5a9ee8] transition-all duration-200" style={{ width: `${saveProgress[dl.id]}%` }} />
-                            ) : (
-                              <div className="animate-indeterminate tbar-fill text-[#5a9ee8]" />
-                            )}
-                            <div className="relative flex items-center justify-center h-full gap-1.5">
-                              <Loader size={14} className="animate-spin text-white" />
-                              <span className="text-xs font-medium text-white">
-                                {saveProgress[dl.id] >= 0 ? `Preparing… ${saveProgress[dl.id]}%` : 'Preparing…'}
-                                {saveSpeed[dl.id] ? ` · ${saveSpeed[dl.id]}` : ''}
-                              </span>
-                            </div>
-                          </div>
-                        ) : dl.directOnly ? (
+                        {dl.directOnly ? (
                           // File too big for in-memory share — direct download to Files only.
                           <div className="space-y-2">
                             <button
