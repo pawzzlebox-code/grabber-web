@@ -15,7 +15,9 @@ interface VideoInfo {
   title: string
   thumbnail: string
   duration: number
-  formats: { formatId: string; label: string; ext: string; filesize?: number | null; best?: boolean }[]
+  // directUrl: X only — the complete MP4 on the CDN, fetchable straight from
+  // the browser (see startDirectDownload).
+  formats: { formatId: string; label: string; ext: string; filesize?: number | null; best?: boolean; directUrl?: string }[]
   url: string
   playlistIndex?: number
   uploader?: string
@@ -38,6 +40,13 @@ interface DownloadJob {
   // Set when the file is too big for in-memory share-to-Photos and the
   // user should be offered a direct-download-to-Files button instead.
   directOnly?: boolean
+  // The phone is fetching the file straight from the source's CDN; there is
+  // no server-side job, so nothing to poll, cancel or re-fetch on the server.
+  direct?: boolean
+  // Share of the "Downloading" bar given to the phone pulling the file from
+  // the server. The server's download and that transfer show as one 0–100%
+  // run when nothing happens between them; 0 keeps them as separate steps.
+  xferShare?: number
 }
 
 // Persist settings in localStorage
@@ -91,6 +100,100 @@ function formatSpeed(bytesPerSec: number): string {
   if (!bytesPerSec || bytesPerSec < 0) return ''
   if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`
   return `${Math.max(1, Math.round(bytesPerSec / 1024))} KB/s`
+}
+
+// Seconds → "0:42" / "12:05", for transfer ETAs.
+function formatEta(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) return ''
+  const s = Math.ceil(seconds)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+function isTwitterUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, '')
+    return h === 'twitter.com' || h === 'x.com' || h === 't.co'
+  } catch { return false }
+}
+
+// Direct-from-CDN downloads, in parallel byte ranges like aria2c: one
+// connection to X's CDN tops out around 3 MiB/s from Pakistan, several
+// together go faster. Small files use fewer pieces — each costs a round trip.
+const DIRECT_PIECES = 6
+const DIRECT_MIN_PIECE = 2 * 1024 * 1024
+
+class DirectTooBigError extends Error {}
+
+// X's CDN answers 403 to any request whose Referer is another site (hotlink
+// protection) but serves the same request with no Referer at all — and CORS
+// only needs the Origin header, which is sent regardless. Verified with curl:
+// Referer downloadanyvideo.click → 403, none → 206.
+const NO_REFERRER: ReferrerPolicy = 'no-referrer'
+
+async function fetchInPieces(
+  url: string,
+  signal: AbortSignal,
+  onProgress: (received: number, total: number, bytesPerSec: number) => void,
+): Promise<Blob> {
+  // The CDN allows Range but doesn't expose Content-Range to scripts, so the
+  // total size has to come from a HEAD's Content-Length.
+  const head = await fetch(url, { method: 'HEAD', signal, referrerPolicy: NO_REFERRER })
+  if (!head.ok) throw new Error(`CDN HTTP ${head.status}`)
+  const total = parseInt(head.headers.get('content-length') || '0', 10)
+  if (total > MAX_INMEMORY_BYTES) throw new DirectTooBigError(`${total} bytes`)
+  if (!total) {
+    const r = await fetch(url, { signal, referrerPolicy: NO_REFERRER })
+    if (!r.ok) throw new Error(`CDN HTTP ${r.status}`)
+    return await r.blob()
+  }
+
+  const pieces = Math.max(1, Math.min(DIRECT_PIECES, Math.ceil(total / DIRECT_MIN_PIECE)))
+  const size = Math.ceil(total / pieces)
+  const parts: BlobPart[][] = Array.from({ length: pieces }, () => [])
+  const t0 = performance.now()
+  let received = 0
+  let lastUi = 0
+  const report = (force = false) => {
+    const now = performance.now()
+    if (!force && now - lastUi < 300) return
+    lastUi = now
+    onProgress(received, total, received / Math.max(0.001, (now - t0) / 1000))
+  }
+
+  await Promise.all(parts.map(async (chunks, i) => {
+    const start = i * size
+    const end = Math.min(total, start + size) - 1
+    for (let attempt = 0; ; attempt++) {
+      let got = 0
+      try {
+        const r = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal, referrerPolicy: NO_REFERRER })
+        // A 200 here means the Range was ignored and the whole file is coming
+        // — fatal with several pieces, since each would fetch everything.
+        if (r.status !== 206 && !(r.status === 200 && pieces === 1)) throw new Error(`CDN HTTP ${r.status}`)
+        if (!r.body) throw new Error('No response body')
+        const reader = r.body.getReader()
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          chunks.push(value)
+          got += value.length
+          received += value.length
+          report()
+        }
+        if (got !== end - start + 1) throw new Error(`Piece ${i} came back short`)
+        return
+      } catch (err) {
+        if (signal.aborted || attempt >= 2) throw err
+        // Retry this piece from scratch; take its partial bytes back out of the total.
+        received -= got
+        chunks.length = 0
+      }
+    }
+  }))
+  report(true)
+  // Hand the chunks straight to Blob, in order — no manual concat, so there
+  // is never a second full-size copy in memory.
+  return new Blob(parts.flat(), { type: 'video/mp4' })
 }
 
 function formatDuration(s: number): string {
@@ -350,6 +453,10 @@ export default function GrabberApp() {
   // sends for free but a server-side fetch has to be told.
   const [referer, setReferer] = useState('')
   const [videos, setVideos] = useState<VideoInfo[]>([])
+  // Videos whose download has been handed to the server. Their result card is
+  // hidden from then on — the download card's banner already shows the same
+  // thumbnail, so keeping both just doubles the picture.
+  const [queuedVideoIds, setQueuedVideoIds] = useState<Set<string>>(() => new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [downloads, setDownloads] = useState<DownloadJob[]>([])
@@ -364,6 +471,8 @@ export default function GrabberApp() {
   // Live transfer speed shown during the "Preparing" phase (phone pulling the
   // finished file from the server), keyed by download id, e.g. "10.2 MB/s".
   const [saveSpeed, setSaveSpeed] = useState<Record<string, string>>({})
+  // ETA for that same transfer, e.g. "2:41" — the long part of a no-desktop job.
+  const [saveEta, setSaveEta] = useState<Record<string, string>>({})
   const fileCache = useRef<Record<string, File>>({})
   // iOS Safari leaks navigator.share state across calls — once a share throws
   // InvalidStateError the state is stuck until the tab reloads. Track whether
@@ -731,6 +840,7 @@ export default function GrabberApp() {
     setLoading(true)
     setError('')
     setVideos([])
+    setQueuedVideoIds(new Set())
     setSelectedFormats({})
     autoTriggered.current = false
 
@@ -782,7 +892,7 @@ export default function GrabberApp() {
     // + startPhotoJob — all need to be in deps so the closure stays fresh.
   }, [desktopTunnelUrl, settings.desktopKey, settings.photoMode, startPhotoJob])
 
-  const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string) => {
+  const handleDownload = async (video: VideoInfo, formatId: string, formatLabel: string, opts: { noDirect?: boolean } = {}) => {
     haptic(10) // light tap on download start (Android/desktop; no-op on iOS)
     // Direct download mode: browser fetches from source URL
     if (settings.directDownload) {
@@ -808,11 +918,28 @@ export default function GrabberApp() {
       }
     }
 
+    // From here on a download card will replace this video's result card, so
+    // hide the card now — before the awaits below, or auto-best would flash it.
+    // Every way out that doesn't start a job puts it back for a retry.
+    setQueuedVideoIds(prev => new Set(prev).add(video.id))
+    const unqueue = () => setQueuedVideoIds(prev => {
+      const next = new Set(prev)
+      next.delete(video.id)
+      return next
+    })
+
+    // X without the desktop: the phone fetches the file from X's CDN itself
+    // (see startDirectDownload). Not with subtitle burning — that needs the
+    // server's Whisper transcript. Decided here so the server disk check below
+    // doesn't block a download the server will never hold.
+    const pick = video.formats.find(f => f.formatId === formatId)
+    const tryDirect = !apiBase() && !!pick?.directUrl && !settings.burnSubtitles && !opts.noDirect
+
     // Pre-flight disk check — only for droplet-hosted downloads (the desktop
     // path uses the user's PC disk, which has ample room). Best-effort: many
     // YouTube formats report no filesize, in which case we skip the check and
     // rely on the server's floor. ×1.3 accounts for muxing/remux overhead.
-    if (!apiBase()) {
+    if (!apiBase() && !tryDirect) {
       const fmt = video.formats.find(f => f.formatId === formatId)
       const estBytes = fmt?.filesize ? fmt.filesize * 1.3 : 0
       if (estBytes > 0) {
@@ -827,6 +954,7 @@ export default function GrabberApp() {
         if (free !== undefined && estBytes > free) {
           const gb = (b: number) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`
           setError(`Not enough server space — need ~${gb(estBytes)}, only ${gb(free)} free. Clear space in Settings or pick a lower quality.`)
+          unqueue()
           return
         }
       }
@@ -835,7 +963,7 @@ export default function GrabberApp() {
     // Confirm processing path. If user wants desktop but it's not online,
     // ensureProcessingPath shows the modal and waits for a decision.
     const proceed = await ensureProcessingPath()
-    if (!proceed) return
+    if (!proceed) { unqueue(); return }
 
     // Wait for the WebCodecs probe to settle so the auto-pick is correct.
     const probed = webCodecsProbe.current ? await webCodecsProbe.current : false
@@ -846,6 +974,24 @@ export default function GrabberApp() {
     // faster than the droplet's 1-vCPU libx264.
     const usingDesktop = !!apiBase()
     const useInstant = !usingDesktop && probed
+
+    // On iOS an X file must be re-encoded before Photos accepts it, which the
+    // direct path can only do on-device — so it needs WebCodecs there.
+    if (tryDirect && !usingDesktop && pick?.directUrl && (probed || !isIOS())) {
+      startDirectDownload(video, formatId, pick.directUrl, formatLabel, probed)
+      return
+    }
+
+    // One "Downloading" bar covers the server's download and the phone's pull,
+    // weighted by roughly how long each takes (the PC is fast both ways; the
+    // droplet downloads in seconds but reaches Pakistan at ~1 MiB/s). When the
+    // server converts in between, a single bar would have to run backwards
+    // through the conversion, so the pull stays its own short step instead.
+    const serverConverts = useInstant
+      ? settings.burnSubtitles
+      : isTwitterUrl(video.url) || settings.verticalPad || settings.burnSubtitles
+    const xferShare = serverConverts ? 0 : usingDesktop ? 0.2 : 0.9
+
     try {
       const res = await fetch(`${apiBase()}/api/download`, {
         method: 'POST',
@@ -874,6 +1020,7 @@ export default function GrabberApp() {
         percent: 0, speed: '', eta: '', totalSize: '',
         url: video.url,
         formatLabel,
+        xferShare,
       }
 
       setDownloads(prev => [job, ...prev])
@@ -916,6 +1063,10 @@ export default function GrabberApp() {
               totalSize: state.totalSize || '',
               fileName: state.fileName || d.fileName,
               error: state.error || d.error,
+              // A conversion nobody predicted (e.g. a VP9 source) sits between
+              // the download and the pull; show the pull as its own step rather
+              // than send the merged bar back to where the download stopped.
+              xferShare: state.status === 'converting' || state.status === 'subtitling' ? 0 : d.xferShare,
             }
             return next
           }))
@@ -992,7 +1143,76 @@ export default function GrabberApp() {
       poll()
     } catch (err: any) {
       setError(err.message || 'Failed to start download')
+      unqueue()
     }
+  }
+
+  // X straight from its CDN to the phone: no server job, so downloading and
+  // "send to phone" are the same step. Any failure before the file is in hand
+  // falls back to the server path, so the user still gets the video.
+  const startDirectDownload = async (video: VideoInfo, formatId: string, directUrl: string, formatLabel: string, canProcess: boolean) => {
+    const id = `direct-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+    const log = (msg: string) => setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] ${msg}`])
+    const ac = new AbortController()
+    cancelHandles.current[id] = { stop: () => {}, abort: ac }
+    const job: DownloadJob = {
+      id,
+      title: video.title,
+      thumbnail: video.thumbnail,
+      status: 'downloading',
+      percent: 0, speed: '', eta: '', totalSize: '',
+      url: video.url,
+      formatLabel,
+      direct: true,
+    }
+    setDownloads(prev => [job, ...prev])
+    log(`direct: ${formatLabel} from ${new URL(directUrl).host}`)
+
+    let blob: Blob
+    try {
+      blob = await fetchInPieces(directUrl, ac.signal, (received, total, bps) => {
+        setDownloads(prev => prev.map(d => d.id !== id ? d : {
+          ...d,
+          percent: (received / total) * 100,
+          speed: formatSpeed(bps),
+          eta: formatEta((total - received) / bps),
+          totalSize: `${(total / 1048576).toFixed(2)}MiB`,
+        }))
+      })
+    } catch (err: any) {
+      // Cancelled: handleCancelDownload has already marked the card.
+      if (ac.signal.aborted) return
+      log(err instanceof DirectTooBigError
+        ? `direct: too big to hold in memory (${err.message}) — using the server`
+        : `direct: failed (${err?.message || err}) — using the server`)
+      delete cancelHandles.current[id]
+      setDownloads(prev => prev.filter(d => d.id !== id))
+      handleDownload(video, formatId, formatLabel, { noDirect: true })
+      return
+    }
+
+    haptic([15, 40, 15])
+    const name = `${(video.title || 'video').slice(0, 80)}.mp4`
+    setDownloads(prev => prev.map(d => d.id !== id ? d : {
+      ...d, status: 'done' as const, percent: 100, speed: '', eta: '', fileName: name,
+    }))
+    log(`direct: done, ${(blob.size / 1048576).toFixed(1)} MB`)
+
+    // X files need the iOS-compat re-encode before Photos takes them, same as
+    // on the server path; elsewhere only an explicit 9:16 pad needs the worker.
+    if (canProcess && (isIOS() || settings.verticalPad)) {
+      try {
+        await processOnDevice(id, blob, name, '', settings.verticalPad, false)
+        return
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || /cancel/i.test(err?.message || '')) return
+        log(`direct: device processing failed (${err?.message || err}) — keeping the original file`)
+        setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+      }
+    }
+    fileCache.current[id] = new File([blob], name, { type: 'video/mp4' })
+    setFileReady(prev => ({ ...prev, [id]: true }))
+    delete cancelHandles.current[id]
   }
 
   // Pre-fetch file from server into cache (with progress), called automatically when download completes on mobile
@@ -1040,6 +1260,7 @@ export default function GrabberApp() {
             const bps = received / ((now - t0) / 1000)
             setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
             setSaveSpeed(prev => ({ ...prev, [id]: formatSpeed(bps) }))
+            setSaveEta(prev => ({ ...prev, [id]: formatEta((total - received) / bps) }))
           }
         }
         setSaveProgress(prev => ({ ...prev, [id]: 100 }))
@@ -1065,12 +1286,47 @@ export default function GrabberApp() {
       fileCache.current[id] = new File([blob], name, { type: mime })
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
       setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
+      setSaveEta(prev => { const n = { ...prev }; delete n[id]; return n })
       setFileReady(prev => ({ ...prev, [id]: true }))
     } catch {
       // Prefetch failed or was cancelled — clear progress, user can tap to retry
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
       setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
+      setSaveEta(prev => { const n = { ...prev }; delete n[id]; return n })
     }
+  }
+
+  // Run the WebCodecs worker on a file already in memory, then cache the
+  // result for Save to Photos. Throws on failure or cancel; callers decide
+  // the fallback.
+  const processOnDevice = async (id: string, rawBlob: Blob, name: string, srt: string, padTo9x16: boolean, burnSubtitles: boolean) => {
+    setInstantProgress(prev => ({ ...prev, [id]: { pct: 0, stage: 'Starting device encoder...' } }))
+    setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode: starting WebCodecs worker (${(rawBlob.size / 1024 / 1024).toFixed(1)} MB)`])
+
+    const handle = runWorker(
+      rawBlob,
+      { padTo9x16, burnSubtitles, srt },
+      (pct, stage) => {
+        setInstantProgress(prev => ({ ...prev, [id]: { pct, stage } }))
+      },
+      (msg) => {
+        // Worker console.log / warn / error forwarded to our on-screen debug panel
+        setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] [worker] ${msg}`])
+      },
+    )
+    // Register worker in cancel handles so the cancel button can terminate it
+    const existingHandle = cancelHandles.current[id] || { stop: () => {} }
+    cancelHandles.current[id] = { ...existingHandle, worker: handle }
+    const processed = await handle.promise
+
+    setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode done: ${(processed.size / 1024 / 1024).toFixed(1)} MB`])
+
+    // Swap the cached file for the processed version, enable Save to Photos
+    const outName = name.replace(/\.[^.]+$/, '') + '_processed.mp4'
+    fileCache.current[id] = new File([processed], outName, { type: 'video/mp4' })
+    setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
+    setFileReady(prev => ({ ...prev, [id]: true }))
+    delete cancelHandles.current[id]
   }
 
   // Instant mode: fetch raw video from server, then process locally via WebCodecs worker.
@@ -1108,6 +1364,7 @@ export default function GrabberApp() {
             const bps = received / ((now - t0) / 1000)
             setSaveProgress(prev => ({ ...prev, [id]: Math.round((received / total) * 100) }))
             setSaveSpeed(prev => ({ ...prev, [id]: formatSpeed(bps) }))
+            setSaveEta(prev => ({ ...prev, [id]: formatEta((total - received) / bps) }))
           }
         }
         // Skip manual concat — see prefetchFile for the iOS Safari OOM rationale.
@@ -1118,6 +1375,7 @@ export default function GrabberApp() {
       }
       setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
       setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
+      setSaveEta(prev => { const n = { ...prev }; delete n[id]; return n })
 
       // Same tiny-file guard as prefetchFile — bail before WebCodecs decodes garbage.
       if (rawBlob.size < 1024) {
@@ -1125,34 +1383,8 @@ export default function GrabberApp() {
         return
       }
 
-      // Step 2: WebCodecs worker — local pad + burn subs
-      setInstantProgress(prev => ({ ...prev, [id]: { pct: 0, stage: 'Starting device encoder...' } }))
-      setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode: starting WebCodecs worker (${(rawBlob.size / 1024 / 1024).toFixed(1)} MB)`])
-
-      const handle = runWorker(
-        rawBlob,
-        { padTo9x16, burnSubtitles, srt },
-        (pct, stage) => {
-          setInstantProgress(prev => ({ ...prev, [id]: { pct, stage } }))
-        },
-        (msg) => {
-          // Worker console.log / warn / error forwarded to our on-screen debug panel
-          setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] [worker] ${msg}`])
-        },
-      )
-      // Register worker in cancel handles so the cancel button can terminate it
-      const existingHandle = cancelHandles.current[id] || { stop: () => {} }
-      cancelHandles.current[id] = { ...existingHandle, worker: handle }
-      const processed = await handle.promise
-
-      setDebugLogs(prev => [...prev.slice(-80), `[${new Date().toLocaleTimeString()}] Instant mode done: ${(processed.size / 1024 / 1024).toFixed(1)} MB`])
-
-      // Step 3: swap cached file with processed version, enable Save to Photos
-      const outName = name.replace(/\.[^.]+$/, '') + '_processed.mp4'
-      fileCache.current[id] = new File([processed], outName, { type: 'video/mp4' })
-      setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
-      setFileReady(prev => ({ ...prev, [id]: true }))
-      delete cancelHandles.current[id]
+      // Steps 2–3: WebCodecs worker — local pad + burn subs — then Save to Photos.
+      await processOnDevice(id, rawBlob, name, srt, padTo9x16, burnSubtitles)
     } catch (err: any) {
       // If cancelled, the fetch / worker was aborted intentionally — don't fall through
       if (err?.name === 'AbortError' || /cancel/i.test(err?.message || '')) {
@@ -1173,6 +1405,11 @@ export default function GrabberApp() {
   const handleSaveToPhotos = async (id: string, fileName: string) => {
     const cached = fileCache.current[id]
     if (!cached) {
+      // A direct download only ever existed in memory; the server has no copy.
+      if (id.startsWith('direct-')) {
+        setError('That video is no longer in memory. Download it again.')
+        return
+      }
       setDebugLogs(prev => [...prev.slice(-50), `[${new Date().toLocaleTimeString()}] Save: no cached file, re-fetching`])
       prefetchFile(id, fileName)
       return
@@ -1275,6 +1512,7 @@ export default function GrabberApp() {
     // Clear everything first
     setUrl('')
     setVideos([])
+    setQueuedVideoIds(new Set())
     setError('')
     setDownloads([])
     setSaveProgress({})
@@ -1343,16 +1581,20 @@ export default function GrabberApp() {
       delete cancelHandles.current[id]
     }
 
-    // 2. Tell server to kill child processes and delete the file
-    try {
-      await fetch(`${apiBase()}/api/cancel/${id}`, { method: 'POST', cache: 'no-store', headers: apiHeaders(false) })
-    } catch (err) {
-      console.error('[cancel] server request failed', err)
+    // 2. Tell server to kill child processes and delete the file — unless the
+    //    phone was fetching from the CDN itself, when there's no server job.
+    if (!id.startsWith('direct-')) {
+      try {
+        await fetch(`${apiBase()}/api/cancel/${id}`, { method: 'POST', cache: 'no-store', headers: apiHeaders(false) })
+      } catch (err) {
+        console.error('[cancel] server request failed', err)
+      }
     }
 
     // 3. Clear any per-id progress state
     setSaveProgress(prev => { const n = { ...prev }; delete n[id]; return n })
     setSaveSpeed(prev => { const n = { ...prev }; delete n[id]; return n })
+    setSaveEta(prev => { const n = { ...prev }; delete n[id]; return n })
     setInstantProgress(prev => { const n = { ...prev }; delete n[id]; return n })
     setFileReady(prev => { const n = { ...prev }; delete n[id]; return n })
     delete fileCache.current[id]
@@ -1736,12 +1978,12 @@ export default function GrabberApp() {
         )}
 
         {/* Video Info Cards — stacked for multi-video */}
-        {videos.length > 0 && (
+        {videos.some(v => !queuedVideoIds.has(v.id)) && (
           <div className="space-y-3">
             {videos.length > 1 && (
               <p className="pixel-head text-xs font-bold uppercase tracking-[0.18em]">{videos.length} videos found</p>
             )}
-            {videos.map((video, idx) => (
+            {videos.map((video, idx) => queuedVideoIds.has(video.id) ? null : (
               <div key={video.id} className="panel overflow-hidden animate-fade-in">
                 {video.thumbnail && (
                   <div className="relative">
@@ -1824,11 +2066,13 @@ export default function GrabberApp() {
               </div>
             ))}
 
-            {/* Download All button for multi-video */}
-            {videos.length > 1 && !settings.autoBest && (
+            {/* Download All button for multi-video — only the ones not
+                already started, so a second tap can't queue duplicates. */}
+            {videos.filter(v => !queuedVideoIds.has(v.id)).length > 1 && !settings.autoBest && (
               <button
                 onClick={() => {
                   for (const v of videos) {
+                    if (queuedVideoIds.has(v.id)) continue
                     const fmtId = selectedFormats[v.id] || v.formats[0]?.formatId
                     const fmt = v.formats.find(f => f.formatId === fmtId)
                     handleDownload(v, fmtId, fmt?.label || 'Best Quality')
@@ -1837,7 +2081,7 @@ export default function GrabberApp() {
                 className="w-full h-10 px-4 raised text-sm transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 <Download size={16} />
-                Download All ({videos.length} videos)
+                Download All ({videos.filter(v => !queuedVideoIds.has(v.id)).length} videos)
               </button>
             )}
           </div>
@@ -1968,12 +2212,21 @@ export default function GrabberApp() {
               const busy = active || saveProgress[dl.id] !== undefined || !!instantProgress[dl.id]
               const device = instantProgress[dl.id]
               const prep = saveProgress[dl.id]
+              // The server's download and the phone's pull read as one
+              // "Downloading" run: the first (1 - share) of the bar is the
+              // server, the rest is the pull (see xferShare in handleDownload).
+              const share = dl.xferShare || 0
+              const mergedPull = share > 0 && dl.status === 'done' && !device && prep !== undefined
+              const dlPct = dl.status === 'downloading' ? dl.percent * (1 - share)
+                : mergedPull ? (1 - share) * 100 + Math.max(0, prep ?? 0) * share
+                : 0
               // What the banner draws — same priority order as the action area.
               const scan: { mode: ScanMode; pct: number; chip: string } =
                 dl.status === 'error' ? { mode: 'error', pct: 0, chip: 'Signal lost' }
-                : dl.status === 'downloading' ? { mode: 'download', pct: dl.percent, chip: dl.percent > 0 ? scanPct(dl.percent) : 'Starting…' }
+                : dl.status === 'downloading' ? { mode: 'download', pct: dlPct, chip: dlPct > 0 ? scanPct(dlPct) : 'Starting…' }
                 : active ? { mode: 'convert', pct: dl.percent, chip: scanChip(dl.status === 'subtitling' ? 'Subs' : 'Encode', dl.percent) }
                 : device ? { mode: 'convert', pct: device.pct, chip: scanChip('Device', device.pct) }
+                : mergedPull ? { mode: 'download', pct: dlPct, chip: scanPct(dlPct) }
                 : prep !== undefined ? { mode: 'prepare', pct: prep, chip: scanChip('→ Phone', prep) }
                 : { mode: 'ready', pct: 100, chip: 'Ready' }
               return (
@@ -2037,14 +2290,18 @@ export default function GrabberApp() {
                     {active && (() => {
                       const label = dl.status === 'converting' ? 'Converting'
                         : dl.status === 'subtitling' ? 'Subtitles' : 'Downloading'
-                      const determinate = dl.percent > 0
-                      // No bar here — the banner above is the progress bar.
+                      const shown = dl.status === 'downloading' ? dlPct : dl.percent
+                      const determinate = shown > 0
+                      // No bar here — the banner above is the progress bar. When
+                      // the phone's pull dominates (no desktop), the server's own
+                      // ETA would claim seconds for a wait of minutes, so it's
+                      // left out until the pull starts and has its own.
                       return (
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
-                          <span className="text-text-secondary">{determinate ? `${label}… ${dl.percent.toFixed(0)}%` : `${label}…`}</span>
+                          <span className="text-text-secondary">{determinate ? `${label}… ${shown.toFixed(0)}%` : `${label}…`}</span>
                           {dl.totalSize && <span>{dl.totalSize}</span>}
                           {dl.speed && <span>{dl.speed}</span>}
-                          {dl.eta && <span className="whitespace-nowrap">ETA {dl.eta}</span>}
+                          {dl.eta && share < 0.5 && <span className="whitespace-nowrap">ETA {dl.eta}</span>}
                         </div>
                       )
                     })()}
@@ -2054,6 +2311,12 @@ export default function GrabberApp() {
                     {device ? (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
                         <span className="text-text-secondary">{device.stage}{device.pct > 0 ? ` ${device.pct}%` : ''}</span>
+                      </div>
+                    ) : mergedPull ? (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
+                        <span className="text-text-secondary">{`Downloading… ${dlPct.toFixed(0)}%`}</span>
+                        {saveSpeed[dl.id] && <span>{saveSpeed[dl.id]}</span>}
+                        {saveEta[dl.id] && <span className="whitespace-nowrap">ETA {saveEta[dl.id]}</span>}
                       </div>
                     ) : prep !== undefined && (
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-xs text-text-muted font-mono">
@@ -2107,7 +2370,7 @@ export default function GrabberApp() {
                               <Download size={16} />
                             </button>
                           </div>
-                        ) : canShare && !fileReady[dl.id] ? (
+                        ) : canShare && !fileReady[dl.id] && !dl.direct ? (
                           <button
                             onClick={() => prefetchFile(dl.id, dl.fileName || 'download')}
                             className="w-full h-10 px-4 raised text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
@@ -2116,7 +2379,7 @@ export default function GrabberApp() {
                           </button>
                         ) : (
                           <button
-                            onClick={() => triggerFileDownload(dl.id, dl.fileName || 'download')}
+                            onClick={() => handleDirectDownload(dl.id, dl.fileName || 'download')}
                             className="w-full h-10 px-4 raised text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                           >
                             Save file

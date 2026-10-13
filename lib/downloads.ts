@@ -12,7 +12,9 @@ export interface VideoInfo {
   duration: number
   // `best` marks the top pill — highest resolution, downloaded via the
   // resilient best-chain rather than a height cap.
-  formats: { formatId: string; label: string; ext: string; filesize?: number; best?: boolean }[]
+  // `directUrl` (X only) is the complete MP4 that pill would download, on a
+  // CDN the browser may fetch from itself — see buildFormats.
+  formats: { formatId: string; label: string; ext: string; filesize?: number; best?: boolean; directUrl?: string }[]
   url: string
   playlistIndex?: number
   // Author + publish date for the metadata row (e.g. "@AbsoluteBruno · Mar 12").
@@ -465,6 +467,24 @@ function buildFormats(json: any, twitter: boolean): VideoInfo['formats'] {
   } else {
     // No parseable heights (rare) — fall back to a single generic pill.
     formats.push({ formatId: bestFormat, label: 'Best Quality', ext: 'mp4', filesize: undefined, best: true })
+  }
+
+  // X serves every height as a complete MP4 (the `https` http-* formats) from
+  // video.twimg.com, which allows this site's origin and byte ranges and isn't
+  // bound to the IP that resolved it. The phone can fetch that file itself,
+  // skipping the server → phone hop across the ocean (~1 MiB/s from Pakistan,
+  // against 3–4 MiB/s straight from the CDN). Attach the exact file each pill's
+  // `b[...]` selector would have picked.
+  if (twitter) {
+    const progressive = (json.formats || [])
+      .filter((f: any) => f.protocol === 'https' && f.height && f.url)
+      .sort((a: any, b: any) => (b.height || 0) - (a.height || 0))
+    for (const fmt of formats) {
+      const match = fmt.best
+        ? progressive[0]
+        : progressive.find((f: any) => displayHeight(f.height) === fmt.label)
+      if (match) fmt.directUrl = match.url
+    }
   }
 
   if (!twitter) {
