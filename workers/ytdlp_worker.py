@@ -202,6 +202,20 @@ def run_download(cmd):
     emit({'type': 'status', 'job_id': ctx.job_id, 'message': 'Extracting...'})
 
     with YoutubeDL(opts) as ydl:
+        # With ignoreerrors on, yt-dlp reports a failed extraction (still
+        # printed to stderr as before) and then returns nothing, so its reason
+        # — e.g. Instagram's "redirected to the login page … rate-limit" —
+        # never reached the caller. Keep the last one: the Node side retries
+        # Instagram with cookies on exactly that wording, and it's what the
+        # user should see if every attempt fails.
+        errors = []
+        report_error = ydl.report_error
+
+        def remember_error(message, *args, **kwargs):
+            errors.append(str(message))
+            return report_error(message, *args, **kwargs)
+
+        ydl.report_error = remember_error
         info = ydl.extract_info(cmd['url'], download=True)
         # Prefer the post_hook-captured path (post-merge); fall back to
         # requested_downloads or prepare_filename.
@@ -215,6 +229,10 @@ def run_download(cmd):
         # With ignoreerrors on, yt-dlp can finish "successfully" having saved
         # nothing at all. Only call it done if a real file landed on disk.
         if not filepath or not os.path.exists(filepath):
+            if errors:
+                # Drop yt-dlp's "Use --cookies-from-browser …" advice: it's
+                # for CLI users, and the server handles cookies itself.
+                raise Exception(errors[-1].split(' Use --cookies')[0].strip())
             raise Exception('yt-dlp produced no downloadable file for this URL')
         emit({'type': 'done', 'job_id': ctx.job_id, 'filepath': filepath})
 
