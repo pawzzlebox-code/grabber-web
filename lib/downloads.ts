@@ -25,6 +25,11 @@ export interface VideoInfo {
 export interface DownloadJob {
   id: string
   url: string
+  // Set by cancelDownload before it kills the worker. The pool reports that
+  // kill as an ordinary failure ("worker exited … SIGKILL"), which the retry
+  // logic would otherwise answer by downloading the whole thing again in the
+  // background — with the job already gone and nobody waiting for it.
+  cancelled?: boolean
   title: string
   thumbnail: string
   status: 'pending' | 'downloading' | 'converting' | 'subtitling' | 'done' | 'error'
@@ -1278,6 +1283,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
   let cookies = cookieFileFor(url)
 
   function attemptDownload(attempt: number, useFallbackFormat: boolean = false) {
+    if (job.cancelled) return
     job.percent = 0
     job.eta = ''
     let lastError = ''
@@ -1370,6 +1376,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         },
         onDone: (filepath) => {
           clearInterval(stallTimer)
+          if (job.cancelled) return
           job.cancel = undefined
           if (!filepath) {
             job.status = 'error'
@@ -1451,6 +1458,7 @@ export function startDownload(id: string, url: string, formatId?: string, title?
         },
         onError: (message, traceback) => {
           clearInterval(stallTimer)
+          if (job.cancelled) return
           job.cancel = undefined
           lastError = message
           job.traceback = traceback
@@ -1548,6 +1556,7 @@ export function startDownloadWithCookies(id: string, url: string, cookiesTxt?: s
 export function cancelDownload(id: string) {
   const job = downloads.get(id)
   if (!job) return
+  job.cancelled = true
 
   // 1a. Ask the ytdlp pool to drop/kill this job's worker, if any
   if (job.cancel) {
