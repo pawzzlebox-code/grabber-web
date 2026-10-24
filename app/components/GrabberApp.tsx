@@ -564,13 +564,36 @@ export default function GrabberApp() {
   // available + the user has the cookie key configured. No toggle needed.
   // Cloudflared boots ~10s after Share-with-iPhone is enabled, and its URL
   // rotates on every desktop restart, so refresh every 20s + on focus.
+  //
+  // A registered desktop is only used once this phone has actually reached
+  // it. Registration says the PC is up; it says nothing about this phone —
+  // Tailscale off, or a DNS app that can't resolve the tailnet name — and
+  // routing to an unreachable PC turned every request into "Load failed".
+  // Unreachable is treated like unregistered, so everything falls back to
+  // the server (and the existing "desktop unavailable" prompt) on its own.
   useEffect(() => {
     let cancelled = false
+    const reachable = async (base: string) => {
+      const ac = new AbortController()
+      const t = setTimeout(() => ac.abort(), 4000)
+      try {
+        // Any HTTP answer counts — /ping without the key is a 401, which still
+        // proves the route. No custom headers, so no CORS preflight.
+        await fetch(`${base}/ping`, { cache: 'no-store', signal: ac.signal })
+        return true
+      } catch {
+        return false
+      } finally {
+        clearTimeout(t)
+      }
+    }
     const fetchUrl = async () => {
       try {
         const res = await fetch('/api/desktop', { cache: 'no-store' })
         const data = await res.json()
-        if (!cancelled) setDesktopTunnelUrl(data.tunnelUrl || null)
+        const url: string | null = data.tunnelUrl || null
+        const ok = !!url && await reachable(url)
+        if (!cancelled) setDesktopTunnelUrl(ok ? url : null)
       } catch {
         if (!cancelled) setDesktopTunnelUrl(null)
       }
@@ -984,10 +1007,18 @@ export default function GrabberApp() {
 
     try {
       const refQ = referer.trim() ? `&referer=${encodeURIComponent(referer.trim())}` : ''
-      const res = await fetch(`${apiBase()}/api/info?url=${encodeURIComponent(trimmedUrl)}${refQ}`, {
-        headers: apiHeaders(false),
-        signal: ac.signal,
-      })
+      const path = `/api/info?url=${encodeURIComponent(trimmedUrl)}${refQ}`
+      let res: Response
+      try {
+        res = await fetch(`${apiBase()}${path}`, { headers: apiHeaders(false), signal: ac.signal })
+      } catch (netErr: any) {
+        // The PC stopped answering since the last reachability check: drop
+        // it for now (the next poll re-checks) and ask the server instead.
+        if (!apiBase() || netErr?.name === 'AbortError') throw netErr
+        log(`fetchInfo: desktop unreachable (${netErr?.message || netErr}) — using the server`)
+        setDesktopTunnelUrl(null)
+        res = await fetch(path, { signal: ac.signal })
+      }
       log(`fetchInfo: HTTP ${res.status}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to fetch')
